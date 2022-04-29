@@ -95,7 +95,15 @@ if __name__ == "__main__":
         cutout=args.cutout,
         quiet=args.quiet,
         DENSS_GPU=args.DENSS_GPU,
-        my_logger=my_logger)
+        my_logger=my_logger,
+        reg_scaling=args.reg_scaling,
+        reg_method=args.reg_method,
+        opt_method=args.opt_method,
+        include_lenx=args.include_lenx,
+        reg_coeff=args.reg_coeff,
+        num_patch=args.num_patch,
+        reg_kick_in=args.reg_kick_in,
+        reg_kick_freq=args.reg_kick_freq)
 
     print("\n%s"%args.output)
 

@@ -65,6 +65,7 @@ if __name__ == "__main__":
 
     rho, side = saxs.read_mrc(args.file)
     refrho, refside = saxs.read_mrc(args.ref)
+    #print(rho.shape, side, refrho.shape, refside)
     if rho.shape[0] != refrho.shape[0]:
         print("Shape of rho and ref are not equal.")
         sys.exit()

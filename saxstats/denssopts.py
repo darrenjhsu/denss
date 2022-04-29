@@ -83,6 +83,17 @@ def parse_arguments(parser):
     parser.set_defaults(quiet = False)
     parser.set_defaults(DENSS_GPU = False)
     parser.set_defaults(plot=True)
+
+    parser.add_argument("--reg_scaling", action="store_true")           # Do regularized scaling
+    parser.set_defaults(reg_scaling = False)
+    parser.add_argument("--reg_method", default='patch')             # Choose between {slice, patch}
+    parser.add_argument("--opt_method", default='L-BFGS-B')       # Choose between {Nelder-Mead, L-BFGS-B}
+    parser.add_argument("--include_lenx", default=True)           # Include length of x
+    parser.add_argument("--reg_coeff", default=1, type=float)     # Regularization coefficient (e.g. 1, or 1e-3, or 10)
+    parser.add_argument("--num_patch", default=10, type=int)      # Number of patches if using patch reg method (e.g. 10 or 26)
+    parser.add_argument("--reg_kick_in", default=2000, type=int)  # At which step the regularized scaling kicks in (e.g. 2000 or 500)
+    parser.add_argument("--reg_kick_freq", default=1, type=int)   # How often does the reg scaling operate (every N steps, default 1)
+
     args = parser.parse_args()
 
     if args.plot:

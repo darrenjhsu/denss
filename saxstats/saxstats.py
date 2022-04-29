@@ -892,7 +892,9 @@ def denss(q, I, sigq, dmax, ne=None, voxel=5., oversampling=3., recenter=True, r
     write_xplor_format=False, write_freq=100, enforce_connectivity=True,
     enforce_connectivity_steps=[500], cutout=True, quiet=False, ncs=0,
     ncs_steps=[500],ncs_axis=1, ncs_type="cyclical",abort_event=None, my_logger=logging.getLogger(),
-    path='.', gui=False, DENSS_GPU=False):
+    path='.', gui=False, DENSS_GPU=False,
+    reg_scaling=False, reg_method='patch', opt_method='L_BFGS_B', include_lenx=True,
+    reg_coeff=1.0, num_patch=10, reg_kick_in=2000, reg_kick_freq=1):
     """Calculate electron density from scattering data."""
     if abort_event is not None:
         if abort_event.is_set():
@@ -913,7 +915,6 @@ def denss(q, I, sigq, dmax, ne=None, voxel=5., oversampling=3., recenter=True, r
     D = dmax
 
     #Initialize variables
-
     side = oversampling*D
     halfside = side/2
 
@@ -1066,6 +1067,15 @@ def denss(q, I, sigq, dmax, ne=None, voxel=5., oversampling=3., recenter=True, r
     my_logger.info('Number of q shells: %i', nbins)
     my_logger.info('Width of q shells (angstroms^(-1)): %3.3f', qstep)
     my_logger.info('Random seed: %i', seed)
+    my_logger.info('Regularized scaling mode: %s', reg_scaling)
+    my_logger.info('Regularized scaling method: %s', reg_method)
+    my_logger.info('Optimization method: %s', opt_method)
+    my_logger.info('Including len(x): %s', include_lenx)
+    my_logger.info('Regularization beta: %3.3f', reg_coeff)
+    my_logger.info('Number of patches: %i', num_patch)
+    my_logger.info('Step when regularized scaling kicks in: %i', reg_kick_in)
+    my_logger.info('Frequency of regularized scaling: %i', reg_kick_freq)
+
 
     if not quiet:
         if gui:
@@ -1086,6 +1096,65 @@ def denss(q, I, sigq, dmax, ne=None, voxel=5., oversampling=3., recenter=True, r
         chi = cp.array(chi)
         supportV = cp.array(supportV)
         Imean = cp.array(Imean)
+
+    # Determine patches
+    qpatch_labels = np.zeros_like(qbin_labels)
+    qxyz = np.array([qx.flatten(), qy.flatten(), qz.flatten()]).T
+    unitr = raster_unit_sphere(num_patch)
+    closest_patch = np.argmax(qxyz @ unitr.T, axis=1)
+    # Plotting the patches
+    """
+    print(qxyz.shape)
+    print(closest_patch.shape)
+    import matplotlib.pyplot as plt
+    from mpl_toolkits import mplot3d
+    for q in np.unique(qbin_labels):
+        qsel = (qbin_labels==q).flatten()
+       
+        fig = plt.figure(dpi=300)
+        ax = plt.axes(projection='3d')
+        for p in range(len(unitr)):
+            qshell = np.where(closest_patch[qsel]==p)
+            #print(qshell)
+            
+            ax.plot3D(qxyz[qsel][qshell[0], 0],
+                      qxyz[qsel][qshell[0], 1],
+                      qxyz[qsel][qshell[0], 2],'o', markersize=3, alpha=0.5)
+        fig.savefig(f'test{int(q)}.png')
+    #ax.view_init(elev=90, azim=0)
+
+    print(qxyz.shape)
+
+
+    exit()
+    """
+    # Plotting the slices
+    """ 
+    print(qxyz.shape)
+    print(closest_patch.shape)
+    import matplotlib.pyplot as plt
+    from mpl_toolkits import mplot3d
+    for q in np.unique(qbin_labels):
+      if q > 0:
+        qsel = (qbin_labels==q).flatten()
+       
+        fig = plt.figure(dpi=300)
+        ax = plt.axes(projection='3d')
+        s = np.linspace(0, np.sum(qsel), num=10, dtype=int)
+        print(s)
+        for p in range(len(s)-1):
+            
+            ax.plot3D(qxyz[qsel][s[p]:s[p+1], 0],
+                      qxyz[qsel][s[p]:s[p+1], 1],
+                      qxyz[qsel][s[p]:s[p+1], 2],'o', markersize=3, alpha=0.5)
+        fig.savefig(f'slice{int(q)}.png')
+    #ax.view_init(elev=90, azim=0)
+
+    print(qxyz.shape)
+
+
+    exit()
+    """
 
     for j in range(steps):
         if abort_event is not None:
@@ -1108,7 +1177,55 @@ def denss(q, I, sigq, dmax, ne=None, voxel=5., oversampling=3., recenter=True, r
         #scale Fs to match data
         #factors = myones((len(qbins)))
         factors = mysqrt(Idata/Imean, DENSS_GPU=DENSS_GPU)
-        F *= factors[qbin_labels]
+        factors_single = factors.copy() 
+        if j < 0: # Diagnosis
+            import matplotlib.pyplot as plt
+            from mpl_toolkits import mplot3d
+            fig = plt.figure(dpi=300)
+            ax = plt.axes(projection='3d')
+            print(f'Factors shape: {factors.shape}')
+            print(f'Factors qbin_labels shape: {factors[qbin_labels].shape}')
+            print(f'qr shape: {qr.shape}')
+            for q in np.unique(qbin_labels):
+                print(f'q: {qbins[int(q)]:.3f} | {len(qbin_labels[qbin_labels==q])}')
+            for q in np.unique(qbin_labels):
+                if int(q) == 35:
+                    qshell = np.where(qbin_labels==q)
+                    qpatch_len = int(len(qshell[0])/10)
+                    for p in range(0, len(qshell[0]), qpatch_len):
+                        ax.plot3D(qx_[qshell[0]][p:p+qpatch_len], 
+                                  qx_[qshell[1]][p:p+qpatch_len], 
+                                  qx_[qshell[2]][p:p+qpatch_len],'.', markersize=3, alpha=0.5)
+            #ax.view_init(elev=90, azim=0)
+            fig.savefig('test.png')
+
+        if (j) % 10 == 0:
+            sys.stdout.write(f"{factors[np.unique(qbin_labels)[::10]]}")
+            sys.stdout.flush()
+        factors = factors[qbin_labels]
+        if (j > reg_kick_in) and (reg_scaling):
+            if (j % reg_kick_freq) == 0:
+                for idx, q in enumerate(np.unique(qbin_labels)):
+                    #print(Idata[int(q)])
+                    #print(qbin_labels.shape)
+                    #print(F.shape)
+                    #print(F[qbin_labels==q].shape)
+                    #print(factors[qbin_labels==q].shape)
+                    #print(idx)
+                    if idx == 0:
+                        pass
+                    elif idx == 10:
+                        if reg_method == "slice":
+                            factors[qbin_labels==q] = slice_scaling(Idata[q], F[qbin_labels==q], factors[qbin_labels==q], reg_coeff, num_patch, opt_method, include_lenx, print_res=True)
+                        elif reg_method == "patch":
+                            factors[qbin_labels==q] = patch_scaling(Idata[q], F[qbin_labels==q], factors_single[idx], closest_patch[(qbin_labels==q).flatten()], reg_coeff, num_patch, opt_method, include_lenx, print_res=True)
+                    elif idx < 10:
+                        if reg_method == "slice":
+                            factors[qbin_labels==q] = slice_scaling(Idata[q], F[qbin_labels==q], factors[qbin_labels==q], reg_coeff, num_patch, opt_method, include_lenx, print_res=False)
+                        elif reg_method == "patch":
+                            factors[qbin_labels==q] = patch_scaling(Idata[q], F[qbin_labels==q], factors_single[idx], closest_patch[(qbin_labels==q).flatten()], reg_coeff, num_patch, opt_method, include_lenx, print_res=False)
+        F *= factors
+#        F *= factors[qbin_labels]
 
         chi[j] = mysum(((Imean[qba]-Idata[qba])/sigqdata[qba])**2, DENSS_GPU=DENSS_GPU)/Idata[qba].size
         #APPLY REAL SPACE RESTRAINTS
@@ -3415,9 +3532,125 @@ ffcoeff = {
     "Cf": {"a": [36.9185, 25.1995, 18.3317, 4.24391], "b": [0.437533, 3.00775, 12.4044, 83.7881], "c": 13.2674},
 }
 
+def find_small_division(n, max_trial=15):
+    for d in range(5, max_trial+1):
+        if n % d == 0:
+            return d, True
+    return max_trial, False
+
+def slice_scaling(Idata, F, factors, beta, num_patch, opt_method, include_lenx, print_res=False):
+    def scaling_loss_function(x, Idata, F, beta, step, fully_divided, include_lenx, num_patch, evaluate=False):
+        lenx = len(x)
+        x_new = np.zeros(len(F))
+        if len(F) >= num_patch:
+            x = x.repeat(step)
+            if not fully_divided:
+                x_new[:len(x)] = x
+                x_new[len(x):] = x[-1]
+            else:
+                x_new = x
+        else:
+            x_new = x
+        if include_lenx:
+            if not evaluate:
+                return np.square(np.mean(np.square(x_new*np.abs(F))) - Idata) + lenx * beta * np.sum(np.square(np.log10(x_new)))
+            else:
+                return np.square(np.mean(np.square(x_new*np.abs(F))) - Idata), lenx * beta * np.sum(np.square(np.log10(x_new)))
+        else:
+            if not evaluate:
+                return np.square(np.mean(np.square(x_new*np.abs(F))) - Idata) + beta * np.sum(np.square(np.log10(x_new)))
+            else:
+                return np.square(np.mean(np.square(x_new*np.abs(F))) - Idata), beta * np.sum(np.square(np.log10(x_new)))
+    #print("pre :", end=" ")
+
+    #print(f"DATA: {Idata}, CALC_pre: {np.mean(np.square(factors*np.abs(F)))}")
+    
+    if len(factors) < num_patch:
+        patch = len(factors)
+        step = 1
+        fully_divided = True
+    else:
+        patch, fully_divided = find_small_division(len(factors))
+        #print(f'Length of factors is: {len(factors)} | Patch is {patch}')
+        step = len(factors) // patch
+     
+    factors_new = optimize.minimize(scaling_loss_function, np.sqrt(factors[:patch]), (Idata, F, beta, step, fully_divided, include_lenx, num_patch), method=opt_method).x
+    #factors_new = optimize.minimize(scaling_loss_function, np.ones(len(factors[:patch])), (Idata, F, beta, step, fully_divided), method='L-BFGS-B').x
+
+    #res = scaling_loss_function(factors_new, Idata, F, beta, step, fully_divided, True)
+    #print(res)
+
+    #print("post:", end=" ")
+    if print_res:
+        print(factors_new[:5])
+
+    if len(factors) >= num_patch:
+        factors_new = factors_new.repeat(step)
+        if not fully_divided:
+            factors[:len(factors_new)] = factors_new
+            factors[len(factors_new):] = factors_new[-1]
+        else:
+            factors = factors_new
+    else:
+        factors = factors_new
+    #print(f"data: {Idata}, calc: {np.mean(np.square(factors*np.abs(F)))}")
+    # regularized patch scaling of coefficients for every voxel, returns a list of factors
+    return factors 
 
 
 
 
+def patch_scaling(Idata, F, factor, patch_map, beta, num_patch, opt_method, include_lenx, print_res=False):
+    # Idata is a float number
+    # F is a vectorized shell of vertices
+    # factor is a float number (uniform scaling factor as the initial guess)
+    # patch_map is a labeling vector the same length as F
+    # beta is regularization factor
+    def scaling_loss_function(x, Idata, F, patch_map, beta, num_patch, include_lenx, evaluate=False):
+        lenx = len(x)
+        x_new = x[patch_map] 
+        if include_lenx:
+            if not evaluate:
+                return np.square(np.mean(np.square(x_new*np.abs(F))) - Idata) + lenx * beta * np.sum(np.square(np.log10(x_new)))
+            else:
+                return np.square(np.mean(np.square(x_new*np.abs(F))) - Idata), lenx * beta * np.sum(np.square(np.log10(x_new)))
+        else:
+            if not evaluate:
+                return np.square(np.mean(np.square(x_new*np.abs(F))) - Idata) + lenx * beta * np.sum(np.square(np.log10(x_new)))
+            else:
+                return np.square(np.mean(np.square(x_new*np.abs(F))) - Idata), lenx * beta * np.sum(np.square(np.log10(x_new)))
+    
+     
+    factors_new = optimize.minimize(scaling_loss_function, 
+                                    np.ones(num_patch)*factor, 
+                                    (Idata, F, patch_map, beta, num_patch, include_lenx), 
+                                    #method='L-BFGS-B',
+                                    #method='Nelder-Mead', # Works
+                                    method=opt_method, # Works
+                                    #options={'gtol': 1e-3},
+                                    ).x
+    #factors_new = optimize.minimize(scaling_loss_function, np.ones(len(factors[:patch])), (Idata, F, beta, step, fully_divided), method='L-BFGS-B').x
+
+    #res = scaling_loss_function(factors_new, Idata, F, beta, step, fully_divided, True)
+    #print(res)
+
+    #print("post:", end=" ")
+    if print_res:
+        print(factors_new)
+
+    return factors_new[patch_map]
 
 
+def raster_unit_sphere(num=200):
+    L = np.sqrt(num * np.pi);
+    pt = []
+    for i in range(num):
+        h = 1.0 - (2.0 * i + 1.0) / num
+        p = np.arccos(h)
+        t = L * p
+        xu = np.sin(p) * np.cos(t)
+        yu = np.sin(p) * np.sin(t)
+        zu = np.cos(p)
+        pt.append([xu, yu, zu])
+
+    return np.array(pt) 
