@@ -1,0 +1,8 @@
+sh ./6lyz_patch_1e-3r_lenx_Nelder-Mead_10p_500k_1f/denss_scan.sh
+sh ./6lyz_patch_1e-3r_lenx_Nelder-Mead_10p_500k_20f/denss_scan.sh
+sh ./6lyz_patch_1e-3r_lenx_Nelder-Mead_10p_2000k_1f/denss_scan.sh
+sh ./6lyz_patch_1e-3r_lenx_Nelder-Mead_10p_2000k_20f/denss_scan.sh
+sh ./6lyz_patch_1e-3r_lenx_Nelder-Mead_26p_500k_1f/denss_scan.sh
+sh ./6lyz_patch_1e-3r_lenx_Nelder-Mead_26p_500k_20f/denss_scan.sh
+sh ./6lyz_patch_1e-3r_lenx_Nelder-Mead_26p_2000k_1f/denss_scan.sh
+sh ./6lyz_patch_1e-3r_lenx_Nelder-Mead_26p_2000k_20f/denss_scan.sh

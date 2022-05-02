@@ -1,0 +1,8 @@
+2022-04-21 10:34:21 AM BEGIN
+2022-04-21 10:34:21 AM Command: /opt/anaconda3/envs/UB/bin/denss.align.py -f result.mrc -ref ../6lyz.mrc -o aligned
+2022-04-21 10:34:21 AM DENSS Version: 1.6.5
+2022-04-21 10:34:21 AM Map filename(s): ['result.mrc']
+2022-04-21 10:34:21 AM Reference filename: ../6lyz.mrc
+2022-04-21 10:34:21 AM Enantiomer selection: True
+2022-04-21 10:36:25 AM Correlation score to reference: aligned.mrc 6.939e-01
+2022-04-21 10:36:25 AM END
