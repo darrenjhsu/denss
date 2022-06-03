@@ -1,0 +1,11 @@
+
+The way to work with these test cases: 
+
+```
+denss.pdb2mrc.py -f 2cm7.pdb --ignore_waters -o 2cm7 -s 108 -n 216 -c_off & # We want only the 2cm7_centered.pdb
+denss.pdb2mrc.py -f 2cm7_apo.pdb --ignore_waters -o 2cm7_apo -s 108 -n 216 -c_off &
+denss.pdb2mrc.py -f 2cm7_centered.pdb --ignore_waters -o 2cm7 -s 108 -n 216 -c_off &
+denss.rho2dat.py -f 2cm7.mrc -o 2cm7
+
+python ../bin/denss_ligand.py -f 2cm7.dat -o junk -ref 2cm7_apo.mrc -gpu --ligand_center 11.01 -4.25 -11.10 -rc_off --ncs 0 --ne -1 --ligand_mask_mode template --ligand_template 2cm7_ligand.mrc -ec_steps 2000 4000 6000 8000 10000 # Runs may converge well ahead of 11k steps
+```
