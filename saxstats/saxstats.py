@@ -1584,6 +1584,760 @@ def denss(q, I, sigq, dmax, ne=None, voxel=5., oversampling=3., recenter=True, r
 
     return qdata, Idata, sigqdata, qbinsc, Imean, chi, rg, supportV, rho, side
 
+
+def denss_ligand(q, I, sigq, dmax, ref_rho, 
+    ligand_center, ligand_box_size=40, ligand_mask_mode='cubic', ligand_ref=None,
+    ne=None, voxel=5., oversampling=3., recenter=True, recenter_steps=None,
+    recenter_mode="com", positivity=True, extrapolate=True, output="map",
+    steps=None, seed=None, flatten_low_density=True, rho_start=None, add_noise=None,
+    shrinkwrap=True, shrinkwrap_old_method=False,shrinkwrap_sigma_start=3,
+    shrinkwrap_sigma_end=1.5, shrinkwrap_sigma_decay=0.99, shrinkwrap_threshold_fraction=0.2,
+    shrinkwrap_iter=20, shrinkwrap_minstep=100, chi_end_fraction=0.01,
+    write_xplor_format=False, write_freq=100, enforce_connectivity=True,
+    enforce_connectivity_steps=[500], cutout=True, quiet=False, ncs=0,
+    ncs_steps=[500],ncs_axis=1, ncs_type="cyclical",abort_event=None, my_logger=logging.getLogger(),
+    path='.', gui=False, DENSS_GPU=False,
+    reg_scaling=False, reg_method='patch', opt_method='L_BFGS_B', include_lenx=True,
+    reg_coeff=1.0, num_patch=10, reg_kick_in=2000, reg_kick_freq=1):
+    """Calculate electron density from scattering data."""
+    if abort_event is not None:
+        if abort_event.is_set():
+            my_logger.info('Aborted!')
+            return []
+
+    if DENSS_GPU and CUPY_LOADED:
+        DENSS_GPU = True
+    elif DENSS_GPU:
+        if gui:
+            my_logger.info("GPU option set, but CuPy failed to load")
+        else:
+            print("GPU option set, but CuPy failed to load")
+        DENSS_GPU = False
+
+    fprefix = os.path.join(path, output)
+
+    D = dmax
+
+    #Initialize variables
+    side = oversampling*D
+    halfside = side/2
+
+    n = int(side/voxel)
+    #want n to be even for speed/memory optimization with the FFT, ideally a power of 2, but wont enforce that
+    if n%2==1:
+        n += 1
+    #store n for later use if needed
+    nbox = n
+
+    dx = side/n
+    dV = dx**3
+    V = side**3
+    x_ = np.linspace(-halfside,halfside,n)
+    x,y,z = np.meshgrid(x_,x_,x_,indexing='ij')
+    r = np.sqrt(x**2 + y**2 + z**2)
+
+
+
+    # Mask for ligand search
+    cx, cy, cz = ligand_center
+    print(f'Ligand center is at {ligand_center}')
+    if ligand_mask_mode == 'sphere':
+        lig_r = np.sqrt((x-cx)**2 + (y-cy)**2 + (z-cz)**2)
+        lig_mask = lig_r < ligand_box_size
+    elif ligand_mask_mode == 'cubic':
+        lig_mask = (np.abs(x-cx) < ligand_box_size) * (np.abs(y-cy) < ligand_box_size) * (np.abs(z-cz) < ligand_box_size)
+    elif ligand_mask_mode == 'template':
+        kernel = ndimage.generate_binary_structure(3, 2)
+        lig_mask = ndimage.binary_dilation(ligand_ref, structure=kernel)
+    else:
+        raise ValueError
+
+    no_overlap_with_ref_rho = 1
+
+    # TODO Maybe further filter by ref_rho - no overlap is allowed
+    if no_overlap_with_ref_rho:
+        lig_mask *= (ref_rho < 0.2) # Remove any overlap
+        struct = ndimage.generate_binary_structure(3, 3)
+        labeled_chunk, num_features = ndimage.label(lig_mask, structure=struct)
+        sums = np.zeros((num_features))
+        print(num_features)
+    
+        #find the feature with the greatest number of electrons
+        for feature in range(num_features+1):
+            sums[feature-1] = np.sum(lig_mask[labeled_chunk==feature])
+        big_feature = np.argmax(sums)+1
+    
+        #remove features from the support that are not the primary feature
+        lig_mask[labeled_chunk != big_feature] = 0
+
+    if ligand_mask_mode == 'sphere':
+        print(f'In sphere mask mode, we have {np.sum(lig_mask)} voxels out of {n**3} voxels for active search')
+    elif ligand_mask_mode == 'cubic':
+        print(f'In cubic mask mode, we have {np.sum(lig_mask)} voxels out of {n**3} voxels for active search')
+    elif ligand_mask_mode == 'template':
+        print(f'In template mask mode, we have {np.sum(lig_mask)} voxels out of {n**3} voxels for active search')
+    print(f'The search area is {np.sum(lig_mask) * dV} A^3')
+
+    #assume rho is given as electron density, not electron count
+    #convert from density to electron count for FFT calculation
+    ref_rho *= dV
+    print(f'Sum of number of electrons from the ref_rho is: {np.sum(ref_rho)}')
+
+
+
+    df = 1/side
+    qx_ = np.fft.fftfreq(x_.size)*n*df*2*np.pi
+    qx, qy, qz = np.meshgrid(qx_,qx_,qx_,indexing='ij')
+    qr = np.sqrt(qx**2+qy**2+qz**2)
+    qmax = np.max(qr)
+    qstep = np.min(qr[qr>0]) - 1e-8 #subtract a tiny bit to deal with floating point error
+    nbins = int(qmax/qstep)
+    qbins = np.linspace(0,nbins*qstep,nbins+1)
+
+    #create modified qbins and put qbins in center of bin rather than at left edge of bin.
+    qbinsc = np.copy(qbins)
+    qbinsc[1:] += qstep/2.
+
+    #create an array labeling each voxel according to which qbin it belongs
+    qbin_labels = np.searchsorted(qbins,qr,"right")
+    qbin_labels -= 1
+
+    #allow for any range of q data
+    qdata = qbinsc[np.where( (qbinsc>=q.min()) & (qbinsc<=q.max()) )]
+    Idata = np.interp(qdata,q,I)
+
+    # Calculate excess electrons that should be for active search region
+    Idata_ne = np.sqrt(Idata[0])
+    lig_ne = Idata_ne - np.sum(ref_rho)
+
+
+    if extrapolate:
+        qextend = qbinsc[qbinsc>=qdata.max()]
+        Iextend = qextend**-4
+        Iextend = Iextend/Iextend[0] * Idata[-1]
+        qdata = np.concatenate((qdata,qextend[1:]))
+        Idata = np.concatenate((Idata,Iextend[1:]))
+
+    #create list of qbin indices just in region of data for later F scaling
+    qbin_args = np.in1d(qbinsc,qdata,assume_unique=True)
+    qba = np.copy(qbin_args) #just for brevity when using it later
+    sigqdata = np.interp(qdata,q,sigq)
+
+    scale_factor = ne**2 / Idata[0]
+    Idata *= scale_factor
+    sigqdata *= scale_factor
+    I *= scale_factor
+    sigq *= scale_factor
+
+    if steps == 'None' or steps is None or np.int(steps) < 1:
+        stepsarr = np.concatenate((enforce_connectivity_steps,[shrinkwrap_minstep]))
+        maxec = np.max(stepsarr)
+        steps = int(shrinkwrap_iter * (np.log(shrinkwrap_sigma_end/shrinkwrap_sigma_start)/np.log(shrinkwrap_sigma_decay)) + maxec)
+        #add enough steps for convergence after shrinkwrap is finished
+        #something like 7000 seems reasonable, likely will finish before that on its own
+        #then just make a round number when using defaults
+        steps += 7621
+    else:
+        steps = np.int(steps)
+
+    Imean = np.zeros((steps+1,len(qbins)))
+    chi = np.zeros((steps+1))
+    rg = np.zeros((steps+1))
+    supportV = np.zeros((steps+1))
+    support = np.ones(x.shape,dtype=bool)
+
+    if seed is None:
+        #Have to reset the random seed to get a random in different from other processes
+        prng = np.random.RandomState()
+        seed = prng.randint(2**31-1)
+    else:
+        seed = int(seed)
+
+    prng = np.random.RandomState(seed)
+
+    #rho_start = ref_rho
+
+    if rho_start is not None:
+        rho = rho_start
+        if add_noise is not None:
+            rho += prng.random_sample(size=x.shape)*add_noise
+    else:
+        rho = prng.random_sample(size=x.shape) #- 0.5
+
+    print(f'Active search rho has a shape of {rho.shape}')
+    print(f'Reference rho has a shape of {ref_rho.shape}')
+
+    sigma = shrinkwrap_sigma_start
+
+    #calculate the starting shrinkwrap volume as the volume of a sphere
+    #of radius Dmax, i.e. much larger than the particle size
+    swbyvol = True
+    swV = V/2.0
+    Vsphere_Dover2 = 4./3 * np.pi * (D/2.)**3
+    swVend = Vsphere_Dover2
+    swV_decay = 0.9
+    first_time_swdensity = True
+    threshold = shrinkwrap_threshold_fraction
+    #erode will make take five outer edge pixels of the support, like a shell,
+    #and will make sure no negative density is in that region
+    #this is to counter an artifact that occurs when allowing for negative density
+    #as the negative density often appears immediately next to positive density
+    #at the edges of the object. This ensures (i.e. biases) only real negative density
+    #in the interior of the object (i.e. more than five pixels from the support boundary)
+    #thus we only need this on when in membrane mode, i.e. when positivity=False
+    if shrinkwrap_old_method or positivity:
+        erode = False
+    else:
+        erode = True
+        erosion_width = 5
+
+    my_logger.info('q range of input data: %3.3f < q < %3.3f', q.min(), q.max())
+    my_logger.info('Maximum dimension: %3.3f', D)
+    my_logger.info('Sampling ratio: %3.3f', oversampling)
+    my_logger.info('Requested real space voxel size: %3.3f', voxel)
+    my_logger.info('Number of electrons: %3.3f', ne)
+    my_logger.info('Number of ligand electrons for the search space: %3.3f', lig_ne)
+    my_logger.info('Recenter: %s', recenter)
+    my_logger.info('Recenter Steps: %s', recenter_steps)
+    my_logger.info('Recenter Mode: %s', recenter_mode)
+    my_logger.info('NCS: %s', ncs)
+    my_logger.info('NCS Steps: %s', ncs_steps)
+    my_logger.info('NCS Axis: %s', ncs_axis)
+    my_logger.info('Positivity: %s', positivity)
+    my_logger.info('Extrapolate high q: %s', extrapolate)
+    my_logger.info('Shrinkwrap: %s', shrinkwrap)
+    my_logger.info('Shrinkwrap Old Method: %s', shrinkwrap_old_method)
+    my_logger.info('Shrinkwrap sigma start (angstroms): %s', shrinkwrap_sigma_start*dx)
+    my_logger.info('Shrinkwrap sigma end (angstroms): %s', shrinkwrap_sigma_end*dx)
+    my_logger.info('Shrinkwrap sigma start (voxels): %s', shrinkwrap_sigma_start)
+    my_logger.info('Shrinkwrap sigma end (voxels): %s', shrinkwrap_sigma_end)
+    my_logger.info('Shrinkwrap sigma decay: %s', shrinkwrap_sigma_decay)
+    my_logger.info('Shrinkwrap threshold fraction: %s', shrinkwrap_threshold_fraction)
+    my_logger.info('Shrinkwrap iterations: %s', shrinkwrap_iter)
+    my_logger.info('Shrinkwrap starting step: %s', shrinkwrap_minstep)
+    my_logger.info('Enforce connectivity: %s', enforce_connectivity)
+    my_logger.info('Enforce connectivity steps: %s', enforce_connectivity_steps)
+    my_logger.info('Chi2 end fraction: %3.3e', chi_end_fraction)
+    my_logger.info('Maximum number of steps: %i', steps)
+    my_logger.info('Grid size (voxels): %i x %i x %i', n, n, n)
+    my_logger.info('Real space box width (angstroms): %3.3f', side)
+    my_logger.info('Real space box range (angstroms): %3.3f < x < %3.3f', x_.min(), x_.max())
+    my_logger.info('Real space box volume (angstroms^3): %3.3f', V)
+    my_logger.info('Real space voxel size (angstroms): %3.3f', dx)
+    my_logger.info('Real space voxel volume (angstroms^3): %3.3f', dV)
+    my_logger.info('Reciprocal space box width (angstroms^(-1)): %3.3f', qx_.max()-qx_.min())
+    my_logger.info('Reciprocal space box range (angstroms^(-1)): %3.3f < qx < %3.3f', qx_.min(), qx_.max())
+    my_logger.info('Maximum q vector (diagonal) (angstroms^(-1)): %3.3f', qr.max())
+    my_logger.info('Number of q shells: %i', nbins)
+    my_logger.info('Width of q shells (angstroms^(-1)): %3.3f', qstep)
+    my_logger.info('Random seed: %i', seed)
+    my_logger.info('Regularized scaling mode: %s', reg_scaling)
+    my_logger.info('Regularized scaling method: %s', reg_method)
+    my_logger.info('Optimization method: %s', opt_method)
+    my_logger.info('Including len(x): %s', include_lenx)
+    my_logger.info('Regularization beta: %3.3f', reg_coeff)
+    my_logger.info('Number of patches: %i', num_patch)
+    my_logger.info('Step when regularized scaling kicks in: %i', reg_kick_in)
+    my_logger.info('Frequency of regularized scaling: %i', reg_kick_freq)
+
+
+    if not quiet:
+        if gui:
+            my_logger.info("\n Step     Chi2     Rg    Support Volume")
+            my_logger.info(" ----- --------- ------- --------------")
+        else:
+            print("\n Step     Chi2     Rg    Support Volume")
+            print(" ----- --------- ------- --------------")
+
+    np.set_printoptions(formatter={'float': lambda x: format(x, '.3E')})
+
+
+    if DENSS_GPU:
+        rho = cp.array(rho)
+        ref_rho = cp.array(ref_rho)
+        lig_mask = cp.array(lig_mask)
+        qbin_labels = cp.array(qbin_labels)
+        qbins = cp.array(qbins)
+        Idata = cp.array(Idata)
+        qbin_args = cp.array(qbin_args)
+        sigqdata = cp.array(sigqdata)
+        support = cp.array(support)
+        chi = cp.array(chi)
+        supportV = cp.array(supportV)
+        Imean = cp.array(Imean)
+
+    # Process initial guess
+    rho = rho * lig_mask # First zero density outside of box
+    rho = rho / mysum(rho, DENSS_GPU=DENSS_GPU) * lig_ne 
+
+
+    # Determine patches (DH)
+    qpatch_labels = np.zeros_like(qbin_labels)
+    qxyz = np.array([qx.flatten(), qy.flatten(), qz.flatten()]).T
+    unitr = raster_unit_sphere(num_patch)
+    closest_patch = np.argmax(qxyz @ unitr.T, axis=1)
+
+    shift_tab = np.zeros(3)
+
+    for j in range(steps):
+        if abort_event is not None:
+            if abort_event.is_set():
+                my_logger.info('Aborted!')
+                return []
+
+        F = myfftn(rho+ref_rho, DENSS_GPU=DENSS_GPU)
+        #ref_F = myfftn(ref_rho, DENSS_GPU=DENSS_GPU)
+         
+        #sometimes, when using denss.refine.py with non-random starting rho,
+        #the resulting Fs result in zeros in some locations and the algorithm to break
+        #here just make those values to be 1e-16 to be non-zero
+        F[myabs(F, DENSS_GPU=DENSS_GPU)==0] = 1e-16
+        #ref_F[myabs(ref_F, DENSS_GPU=DENSS_GPU)==0] = 1e-16
+
+        #APPLY RECIPROCAL SPACE RESTRAINTS
+        #calculate spherical average of intensities from 3D Fs
+
+        I3D = myabs(F, DENSS_GPU=DENSS_GPU)**2
+        Imean = mybinmean(I3D, qbin_labels, DENSS_GPU=DENSS_GPU)
+
+        #I3D = myabs(ref_F * F, DENSS_GPU=DENSS_GPU)
+        #Imean = mybinmean(I3D, qbin_labels, DENSS_GPU=DENSS_GPU)
+
+        #ref_I3D = myabs(ref_F, DENSS_GPU=DENSS_GPU)**2
+        #ref_Imean = mybinmean(ref_I3D, qbin_labels, DENSS_GPU=DENSS_GPU)
+
+
+ 
+        #scale Fs to match data
+        #factors = myones((len(qbins)))
+        factors = mysqrt(Idata/Imean, DENSS_GPU=DENSS_GPU)
+
+        # Idata = (F_protein + alpha F_ligand)**2 
+        #       ~ F_protein**2 + 2 * alpha * F_ligand * F_protein
+        #       = ref_Imean + 2 * alpha * F_ligand * F_protein
+        #       = ref_Imean + 2 * alpha * Icross
+        # (Idata - ref_Imean) / 2 / Icross = alpha
+        #factors = mysqrt(Idata / (ref_Imean + Imean * 2), DENSS_GPU=DENSS_GPU) 
+        #factors = ((Idata - ref_Imean) / Imean / 2.0)
+        factors_single = factors.copy() 
+
+        factors = factors[qbin_labels]
+        if (j > reg_kick_in) and (reg_scaling):
+            if (j % reg_kick_freq) == 0:
+                for idx, q in enumerate(np.unique(qbin_labels)):
+                    if idx == 0:
+                        pass
+                    elif idx == 10:
+                        if reg_method == "slice":
+                            factors[qbin_labels==q] = slice_scaling(Idata[q], F[qbin_labels==q], factors[qbin_labels==q], reg_coeff, num_patch, opt_method, include_lenx, print_res=True)
+                        elif reg_method == "patch":
+                            factors[qbin_labels==q] = patch_scaling(Idata[q], F[qbin_labels==q], factors_single[idx], closest_patch[(qbin_labels==q).flatten()], reg_coeff, num_patch, opt_method, include_lenx, print_res=True)
+                    elif idx < 10:
+                        if reg_method == "slice":
+                            factors[qbin_labels==q] = slice_scaling(Idata[q], F[qbin_labels==q], factors[qbin_labels==q], reg_coeff, num_patch, opt_method, include_lenx, print_res=False)
+                        elif reg_method == "patch":
+                            factors[qbin_labels==q] = patch_scaling(Idata[q], F[qbin_labels==q], factors_single[idx], closest_patch[(qbin_labels==q).flatten()], reg_coeff, num_patch, opt_method, include_lenx, print_res=False)
+
+
+        F *= factors
+#        F *= factors[qbin_labels]
+
+        chi[j] = mysum(((Imean[qba]-Idata[qba])/sigqdata[qba])**2, DENSS_GPU=DENSS_GPU)/Idata[qba].size
+        #chi[j] = mysum(((Imean[qba]*2+ref_Imean[qba]-Idata[qba])/sigqdata[qba])**2, DENSS_GPU=DENSS_GPU)/Idata[qba].size
+        #APPLY REAL SPACE RESTRAINTS
+        rhoprime = myifftn(F, DENSS_GPU=DENSS_GPU)
+        rhoprime = rhoprime.real
+        # Nothing outside of the box gets changed
+        #rhoprime[~lig_mask] = ref_rho[~lig_mask]
+        rhoprime = rhoprime - ref_rho
+        rhoprime[~lig_mask] = 0.0
+        rhoprime = rhoprime / mysum(rhoprime, DENSS_GPU=DENSS_GPU) * lig_ne # Scale the active site to have that number of electrons
+
+        if not DENSS_GPU and j%write_freq == 0:
+            if write_xplor_format:
+                write_xplor(rhoprime/dV, side, fprefix+"_current.xplor")
+            write_mrc(rhoprime/dV, side, fprefix+"_current.mrc")
+
+        if DENSS_GPU:
+            #havent yet updated rho2rg to work with cupy
+            try:
+                rg[j] = rg[j-1]
+                #also, for now, at least we can calculate rg
+                #when running shrinkwrap, since we have
+                #to move to the cpu for numpy anyways there.
+            except:
+                rg[j] = 1.0
+        else:
+            rg[j] = rho2rg(rhoprime,r=r,support=support,dx=dx)
+
+        newrho = myzeros(rho.shape, DENSS_GPU=DENSS_GPU)
+
+
+        #Error Reduction
+        newrho[support] = rhoprime[support]
+        newrho[~support] = 0.0
+
+        #enforce positivity by making all negative density points zero.
+        if positivity:
+            netmp = mysum(newrho, DENSS_GPU=DENSS_GPU)
+            newrho[newrho<0] = 0.0
+            if mysum(newrho, DENSS_GPU=DENSS_GPU) != 0:
+                newrho *= netmp / mysum(newrho, DENSS_GPU=DENSS_GPU)
+
+        #apply non-crystallographic symmetry averaging
+        if ncs != 0 and j in ncs_steps:
+            if DENSS_GPU:
+                newrho = cp.asnumpy(newrho)
+            newrho = align2xyz(newrho)
+            if DENSS_GPU:
+                newrho = cp.array(newrho)
+
+        if ncs != 0 and j in [stepi+1 for stepi in ncs_steps]:
+            if DENSS_GPU:
+                newrho = cp.asnumpy(newrho)
+            if ncs_axis == 1:
+                axes=(1,2) #longest
+                axes2=(0,1) #shortest
+            if ncs_axis == 2:
+                axes=(0,2) #middle
+                axes2=(0,1) #shortest
+            if ncs_axis == 3:
+                axes=(0,1) #shortest
+                axes2=(1,2) #longest
+            degrees = 360./ncs
+            newrho_total = np.copy(newrho)
+            if ncs_type == "dihedral":
+                #first, rotate original about perpendicular axis by 180
+                #then apply n-fold cyclical rotation
+                d2fold = ndimage.rotate(newrho,180,axes=axes2,reshape=False)
+                newrhosym = np.copy(newrho) + d2fold
+                newrhosym /= 2.0
+                newrho_total = np.copy(newrhosym)
+            else:
+                newrhosym = np.copy(newrho)
+            for nrot in range(1,ncs):
+                sym = ndimage.rotate(newrhosym,degrees*nrot,axes=axes,reshape=False)
+                newrho_total += np.copy(sym)
+            newrho = newrho_total / ncs
+
+            #run shrinkwrap after ncs averaging to get new support
+            if shrinkwrap_old_method:
+                #run the old method
+                if j>500:
+                    absv = True
+                else:
+                    absv = False
+                newrho, support = shrinkwrap_by_density_value(newrho,absv=absv,sigma=sigma,threshold=threshold,recenter=recenter,recenter_mode=recenter_mode)
+            else:
+                swN = int(swV/dV)
+                #end this stage of shrinkwrap when the volume is less than a sphere of radius D/2
+                if swbyvol and swV > swVend:
+                    newrho, support, threshold = shrinkwrap_by_volume(newrho,absv=True,sigma=sigma,N=swN,recenter=recenter,recenter_mode=recenter_mode)
+                    swV *= swV_decay
+                else:
+                    threshold = shrinkwrap_threshold_fraction
+                    if first_time_swdensity:
+                        if not quiet:
+                            if gui:
+                                my_logger.info("switched to shrinkwrap by density threshold = %.4f" %threshold)
+                            else:
+                                print("\nswitched to shrinkwrap by density threshold = %.4f" %threshold)
+                        first_time_swdensity = False
+                    newrho, support = shrinkwrap_by_density_value(newrho,absv=True,sigma=sigma,threshold=threshold,recenter=recenter,recenter_mode=recenter_mode)
+
+
+            if DENSS_GPU:
+                newrho = cp.array(newrho)
+
+        if recenter and j in recenter_steps:
+            if DENSS_GPU:
+                newrho = cp.asnumpy(newrho + ref_rho)
+                support = cp.asnumpy(support)
+                lig_mask = cp.asnumpy(lig_mask)
+                ref_rho = cp.asnumpy(ref_rho)
+
+            #cannot run center_rho_roll() function since we want to also recenter the support
+            #perhaps we should fix this in the future to clean it up
+            if recenter_mode == "max":
+                rhocom = np.unravel_index(newrho.argmax(), newrho.shape)
+            else:
+                rhocom = np.array(ndimage.measurements.center_of_mass(np.abs(newrho)))
+            gridcenter = np.array(newrho.shape)/2.
+            shift = gridcenter-rhocom
+            shift = np.rint(shift).astype(int)
+            print(shift)
+            shift_tab += shift
+            print(f'Updated shift_tab to {shift_tab}')
+            newrho = np.roll(np.roll(np.roll(newrho, shift[0], axis=0), shift[1], axis=1), shift[2], axis=2)
+            support = np.roll(np.roll(np.roll(support, shift[0], axis=0), shift[1], axis=1), shift[2], axis=2)
+            lig_mask = np.roll(np.roll(np.roll(lig_mask, shift[0], axis=0), shift[1], axis=1), shift[2], axis=2)
+            ref_rho = np.roll(np.roll(np.roll(ref_rho, shift[0], axis=0), shift[1], axis=1), shift[2], axis=2)
+            if DENSS_GPU:
+                support = cp.array(support)
+                lig_mask = cp.array(lig_mask)
+                ref_rho = cp.array(ref_rho)
+                newrho = cp.array(newrho) - ref_rho
+
+        #update support using shrinkwrap method
+        if shrinkwrap and j >= shrinkwrap_minstep and j%shrinkwrap_iter==1:
+            if DENSS_GPU:
+                newrho = cp.asnumpy(newrho)
+                if j > shrinkwrap_minstep+1:
+                    support = cp.asnumpy(support)
+                    rg[j] = rho2rg(newrho,r=r,support=support,dx=dx)
+
+            if shrinkwrap_old_method:
+                #run the old method
+                if j>500:
+                    absv = True
+                else:
+                    absv = False
+                newrho, support = shrinkwrap_by_density_value(newrho,absv=absv,sigma=sigma,threshold=threshold,recenter=recenter,recenter_mode=recenter_mode)
+            else:
+                swN = int(swV/dV)
+                #end this stage of shrinkwrap when the volume is less than a sphere of radius D/2
+                if swbyvol and swV > swVend:
+                    newrho, support, threshold = shrinkwrap_by_volume(newrho,absv=True,sigma=sigma,N=swN,recenter=recenter,recenter_mode=recenter_mode)
+                    swV *= swV_decay
+                else:
+                    threshold = shrinkwrap_threshold_fraction
+                    if first_time_swdensity:
+                        if not quiet:
+                            if gui:
+                                my_logger.info("switched to shrinkwrap by density threshold = %.4f" %threshold)
+                            else:
+                                print("\nswitched to shrinkwrap by density threshold = %.4f" %threshold)
+                        first_time_swdensity = False
+                    newrho, support = shrinkwrap_by_density_value(newrho,absv=True,sigma=sigma,threshold=threshold,recenter=recenter,recenter_mode=recenter_mode)
+
+            if sigma > shrinkwrap_sigma_end:
+                sigma = shrinkwrap_sigma_decay*sigma
+
+            if DENSS_GPU:
+                newrho = cp.array(newrho)
+                support = cp.array(support)
+
+        #run erode when shrinkwrap is run
+        if erode and j > shrinkwrap_minstep and j%shrinkwrap_iter==1:
+            if DENSS_GPU:
+                newrho = cp.asnumpy(newrho)
+                support = cp.asnumpy(support)
+
+            #eroded is the region of the support _not_ including the boundary pixels
+            #so it is the entire interior. erode_region is _just_ the boundary pixels
+            eroded = ndimage.binary_erosion(support,np.ones((erosion_width,erosion_width,erosion_width)))
+            #get just boundary voxels, i.e. where support=True and eroded=False
+            erode_region = np.logical_and(support,~eroded)
+            #set all negative density in boundary pixels to zero.
+            newrho[(newrho<0)&(erode_region)] = 0
+
+            if DENSS_GPU:
+                newrho = cp.array(newrho)
+                support = cp.array(support)
+
+        if enforce_connectivity and j in enforce_connectivity_steps:
+            if DENSS_GPU:
+                newrho = cp.asnumpy(newrho)
+
+            #first run shrinkwrap to define the features
+            if shrinkwrap_old_method:
+                #run the old method
+                absv = True
+                newrho, support = shrinkwrap_by_density_value(newrho,absv=absv,sigma=sigma,threshold=threshold,recenter=recenter,recenter_mode=recenter_mode)
+            else:
+                #end this stage of shrinkwrap when the volume is less than a sphere of radius D/2
+                swN = int(swV/dV)
+                if swbyvol and swV>swVend:
+                    newrho, support, threshold = shrinkwrap_by_volume(newrho,absv=True,sigma=sigma,N=swN,recenter=recenter,recenter_mode=recenter_mode)
+                else:
+                    newrho, support = shrinkwrap_by_density_value(newrho,absv=True,sigma=sigma,threshold=threshold,recenter=recenter,recenter_mode=recenter_mode)
+
+            #label the support into separate segments based on a 3x3x3 grid
+            struct = ndimage.generate_binary_structure(3, 3)
+            labeled_support, num_features = ndimage.label(support, structure=struct)
+            sums = np.zeros((num_features))
+            if not quiet:
+                if not gui:
+                    print(num_features)
+
+            #find the feature with the greatest number of electrons
+            for feature in range(num_features+1):
+                sums[feature-1] = np.sum(newrho[labeled_support==feature])
+            big_feature = np.argmax(sums)+1
+
+            #remove features from the support that are not the primary feature
+            support[labeled_support != big_feature] = False
+            newrho[~support] = 0
+
+            #reset the support to be the entire grid again
+            #support = np.ones(newrho.shape,dtype=bool)
+
+            if DENSS_GPU:
+                newrho = cp.array(newrho)
+                support = cp.array(support)
+
+        supportV[j] = mysum(support, DENSS_GPU=DENSS_GPU)*dV
+
+        if not quiet:
+            if gui:
+                my_logger.info("% 5i % 4.2e % 3.2f       % 5i          ", j, chi[j], rg[j], supportV[j])
+            else:
+                sys.stdout.write("\r% 5i % 4.2e % 3.2f       % 5i          " % (j, chi[j], rg[j], supportV[j]))
+                sys.stdout.flush()
+
+        #occasionally report progress in logger
+        if j%500==0 and not gui:
+            my_logger.info('Step % 5i: % 4.2e % 3.2f       % 5i          ', j, chi[j], rg[j], supportV[j])
+
+
+        if j > 101 + shrinkwrap_minstep:
+            if DENSS_GPU:
+                lesser = mystd(chi[j-100:j], DENSS_GPU=DENSS_GPU).get() < chi_end_fraction * mymean(chi[j-100:j], DENSS_GPU=DENSS_GPU).get()
+            else:
+                lesser = mystd(chi[j-100:j], DENSS_GPU=DENSS_GPU) < chi_end_fraction * mymean(chi[j-100:j], DENSS_GPU=DENSS_GPU)
+            if lesser:
+                break
+
+        rho = newrho
+        #rho[~lig_mask] = ref_rho[~lig_mask]
+        #rho = rho - ref_rho
+        #rho[~lig_mask] = 0.0
+        #rho = rho / np.sum(rho) * lig_ne # Scale the active search space so it contains correct number of electrons 
+
+    #convert back to numpy outside of for loop
+    if DENSS_GPU:
+        rho = cp.asnumpy(rho)
+        ref_rho = cp.asnumpy(ref_rho)
+        lig_mask = cp.asnumpy(lig_mask)
+        qbin_labels = cp.asnumpy(qbin_labels)
+        qbin_args = cp.asnumpy(qbin_args)
+        sigqdata = cp.asnumpy(sigqdata)
+        Imean = cp.asnumpy(Imean)
+        chi = cp.asnumpy(chi)
+        qbins = cp.asnumpy(qbins)
+        Idata = cp.asnumpy(Idata)
+        support = cp.asnumpy(support)
+        supportV = cp.asnumpy(supportV)
+        Idata = cp.asnumpy(Idata)
+
+    # If recenter, unroll all matrices
+    if recenter:
+        shift_tab = shift_tab.astype(int)
+        print(f'\n\nUnshifting by {shift_tab} ...')
+        support = np.roll(np.roll(np.roll(support, -shift_tab[0], axis=0), -shift_tab[1], axis=1), -shift_tab[2], axis=2)
+        lig_mask = np.roll(np.roll(np.roll(lig_mask, -shift_tab[0], axis=0), -shift_tab[1], axis=1), -shift_tab[2], axis=2)
+        rho = np.roll(np.roll(np.roll(rho, -shift_tab[0], axis=0), -shift_tab[1], axis=1), -shift_tab[2], axis=2)
+        ref_rho = np.roll(np.roll(np.roll(ref_rho, -shift_tab[0], axis=0), -shift_tab[1], axis=1), -shift_tab[2], axis=2)
+
+    F = np.fft.fftn(rho+ref_rho)
+    #ref_F = np.fft.fftn(ref_rho)
+    #calculate spherical average intensity from 3D Fs
+    Imean = ndimage.mean(np.abs(F)**2, labels=qbin_labels, index=np.arange(0,qbin_labels.max()+1))
+    #Imean = ndimage.mean(np.abs(F * ref_F), labels=qbin_labels, index=np.arange(0,qbin_labels.max()+1))
+    #ref_Imean = ndimage.mean(np.abs(ref_F)**2, labels=qbin_labels, index=np.arange(0,qbin_labels.max()+1))
+    #chi[j+1] = np.sum(((Imean[j+1,qbin_args]-Idata)/sigqdata)**2)/qbin_args.size
+
+    #scale Fs to match data
+    #factors = np.ones((len(qbins)))
+    #factors = np.sqrt(Idata/(ref_Imean + Imean * 2))
+    factors = np.sqrt(Idata/Imean)
+    F *= factors[qbin_labels]
+    rho = np.fft.ifftn(F,rho.shape)
+    rho = rho.real
+    #rho[~lig_mask] = ref_rho[~lig_mask]
+    rho = rho - ref_rho
+    rho[~lig_mask] = 0 
+    rho = rho / np.sum(rho) * lig_ne # Scale the active search space so it contains correct number of electrons 
+
+    #negative images yield the same scattering, so flip the image
+    #to have more positive than negative values if necessary
+    #to make sure averaging is done properly
+    #whether theres actually more positive than negative values
+    #is ambiguous, but this ensures all maps are at least likely
+    #the same designation when averaging
+    if np.sum(np.abs(rho[rho<0])) > np.sum(rho[rho>0]):
+        rho *= -1
+
+    #scale total number of electrons
+    if ne is not None:
+        rho *= ne / np.sum(rho)
+
+    rg[j+1] = rho2rg(rho=rho,r=r,support=support,dx=dx)
+    supportV[j+1] = supportV[j]
+
+    #change rho to be the electron density in e-/angstroms^3, rather than number of electrons,
+    #which is what the FFT assumes
+    rho /= dV
+    my_logger.info('FINISHED DENSITY REFINEMENT')
+
+
+    if cutout:
+        #here were going to cut rho out of the large real space box
+        #to the voxels that contain the particle
+        #use D to estimate particle size
+        #assume the particle is in the center of the box
+        #calculate how many voxels needed to contain particle of size D
+        #use bigger than D to make sure we don't crop actual particle in case its larger than expected
+        #lets clip it to a maximum of 2*D to be safe
+        nD = int(2*D/dx)+1
+        #make sure final box will still have even samples
+        if nD%2==1:
+            nD += 1
+
+        nmin = nbox//2 - nD//2
+        nmax = nbox//2 + nD//2 + 2
+        #create new rho array containing only the particle
+        newrho = rho[nmin:nmax,nmin:nmax,nmin:nmax]
+        rho = newrho
+        #do the same for the support
+        newsupport = support[nmin:nmax,nmin:nmax,nmin:nmax]
+        support = newsupport
+        #update side to new size of box
+        side = dx * (nmax-nmin)
+
+    if write_xplor_format:
+        write_xplor(rho,side,fprefix+".xplor")
+        write_xplor(np.ones_like(rho)*support, side, fprefix+"_support.xplor")
+
+    write_mrc(rho,side,fprefix+".mrc")
+    write_mrc(rho-ref_rho/dV,side,fprefix+"_lig.mrc")
+    write_mrc(np.ones_like(rho)*support,side, fprefix+"_support.mrc")
+    write_mrc(lig_mask, side, fprefix+"_mask.mrc")
+
+    #Write some more output files
+    fit = np.zeros(( len(qbinsc),4 ))
+    fit[:len(qdata),0] = qdata
+    fit[:len(Idata),1] = Idata
+    fit[:len(sigqdata),2] = sigqdata
+    fit[:len(Imean),3] = Imean
+    np.savetxt(fprefix+'_map.fit', fit, delimiter=' ', fmt='%.5e'.encode('ascii'),
+        header='q(data),I(data),error(data),I(density)')
+
+    np.savetxt(fprefix+'_stats_by_step.dat',np.vstack((chi, rg, supportV)).T,
+        delimiter=" ", fmt="%.5e".encode('ascii'), header='Chi2 Rg SupportVolume')
+
+    my_logger.info('Number of steps: %i', j)
+    my_logger.info('Final Chi2: %.3e', chi[j])
+    my_logger.info('Final Rg: %3.3f', rg[j+1])
+    my_logger.info('Final Support Volume: %3.3f', supportV[j+1])
+    my_logger.info('Mean Density (all voxels): %3.5f', np.mean(rho))
+    my_logger.info('Std. Dev. of Density (all voxels): %3.5f', np.std(rho))
+    my_logger.info('RMSD of Density (all voxels): %3.5f', np.sqrt(np.mean(np.square(rho))))
+    idx = np.where(np.abs(rho)>0.01*rho.max())
+    my_logger.info('Modified Mean Density (voxels >0.01*max): %3.5f', np.mean(rho[idx]))
+    my_logger.info('Modified Std. Dev. of Density (voxels >0.01*max): %3.5f', np.std(rho[idx]))
+    my_logger.info('Modified RMSD of Density (voxels >0.01*max): %3.5f', np.sqrt(np.mean(np.square(rho[idx]))))
+    # my_logger.info('END')
+
+    #return original unscaled values of Idata (and therefore Imean) for comparison with real data
+    Idata /= scale_factor
+    sigqdata /= scale_factor
+    Imean /= scale_factor
+    I /= scale_factor
+    sigq /= scale_factor
+
+    return qdata, Idata, sigqdata, qbinsc, Imean, chi, rg, supportV, rho, side
+
 def shrinkwrap_by_density_value(rho,absv=True,sigma=3.0,threshold=0.2,recenter=True,recenter_mode="com"):
     """Create support using shrinkwrap method based on threshold as fraction of maximum density
 

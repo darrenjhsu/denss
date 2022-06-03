@@ -94,6 +94,12 @@ def parse_arguments(parser):
     parser.add_argument("--reg_kick_in", default=2000, type=int)  # At which step the regularized scaling kicks in (e.g. 2000 or 500)
     parser.add_argument("--reg_kick_freq", default=1, type=int)   # How often does the reg scaling operate (every N steps, default 1)
 
+    parser.add_argument("-ref", "--ref", default=None, type=str, help="Reference .mrc file for denss_ligand")
+    parser.add_argument("--ligand_center", default=None, nargs=3, type=float, help="Center of ligand search box")
+    parser.add_argument("--ligand_box_size", default=40, type=float, help="Side length of the search box for ligand density, in Angstrom")
+    parser.add_argument("--ligand_mask_mode", default='cubic', type=str, help="Mask shape (cubic or sphere)")
+    parser.add_argument("--ligand_template", default=None, type=str, help="Reference mask file name (maybe from a known ligand)")
+
     args = parser.parse_args()
 
     if args.plot:
@@ -317,6 +323,25 @@ def parse_arguments(parser):
     else:
         voxel = args.voxel
 
+    # IF USING denss_ligand, process the reference .mrc map
+    # Also overwrite dmax to side / oversampling
+    if args.ref is not None:
+        rho, side = saxs.read_mrc(args.ref)
+        dmax = side / args.oversampling
+        nsamples = rho.shape[0]
+        voxel = dmax * args.oversampling / nsamples
+        print(f'This read file has a side of {side} and nsamples={rho.shape[0]}')
+        print(f'Currently Dmax is {dmax}, but we are going to overwrite it to {side / args.oversampling}') 
+        print(f'Voxel is then {voxel}')
+        args.ref = rho
+
+    if args.ligand_template is not None: # ligand_ref is a rho map, must have the same shape as ref_rho
+        rho, _ = saxs.read_mrc(args.ligand_template)
+        args.ligand_mask_mode = 'template'
+        args.ligand_ref = rho > 0
+    else:
+        args.ligand_ref = None
+
     if args.positivity is not None:
         positivity = args.positivity
 
@@ -365,6 +390,8 @@ def parse_arguments(parser):
         #does not want to set the number of electrons, and just
         #set it equal to the square root of the forward scattering I(0)
         args.ne = I[0]**0.5
+
+
 
     #now recollect all the edited options back into args
     args.nsamples = nsamples
