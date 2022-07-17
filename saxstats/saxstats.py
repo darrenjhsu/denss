@@ -82,6 +82,21 @@ def mybinmean(x,bins, DENSS_GPU=False):
         xcount = np.bincount(bins.ravel())
         return xsum/xcount
 
+def mypadbinsum(x, bins, nbins, DENSS_GPU=False):
+    if DENSS_GPU:
+        xsum = cp.bincount(bins.ravel(), x.ravel())
+        #xcount = cp.bincount(bins.ravel())
+        xret = cp.empty(nbins)
+        xret[:] = cp.nan
+        #print(f'bins max {bins.max()}, len xsum {len(xsum)}, nbins {nbins}')
+        xret[int(bins.max())+1-len(xsum):int(bins.max())+1] = xsum
+        return xret
+    else:
+        raise NotImplementedError
+        xsum = np.bincount(bins.ravel(), x.ravel())
+        xcount = np.bincount(bins.ravel())
+        return xsum/xcount
+
 def myones(x, DENSS_GPU=False):
     if DENSS_GPU:
         return cp.ones(x)
@@ -1102,6 +1117,8 @@ def denss(q, I, sigq, dmax, ne=None, voxel=5., oversampling=3., recenter=True, r
     qxyz = np.array([qx.flatten(), qy.flatten(), qz.flatten()]).T
     unitr = raster_unit_sphere(num_patch)
     closest_patch = np.argmax(qxyz @ unitr.T, axis=1)
+    for i in np.unique(closest_patch):
+        print(i, np.sum(closest_patch==i))
     # Plotting the patches
     """
     print(qxyz.shape)
@@ -1687,6 +1704,7 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
 
     df = 1/side
     qx_ = np.fft.fftfreq(x_.size)*n*df*2*np.pi
+    #print(qx_, np.fft.fftshift(qx_))
     qx, qy, qz = np.meshgrid(qx_,qx_,qx_,indexing='ij')
     qr = np.sqrt(qx**2+qy**2+qz**2)
     qmax = np.max(qr)
@@ -1701,6 +1719,7 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
     #create an array labeling each voxel according to which qbin it belongs
     qbin_labels = np.searchsorted(qbins,qr,"right")
     qbin_labels -= 1
+
 
     #allow for any range of q data
     qdata = qbinsc[np.where( (qbinsc>=q.min()) & (qbinsc<=q.max()) )]
@@ -1722,6 +1741,7 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
     qbin_args = np.in1d(qbinsc,qdata,assume_unique=True)
     qba = np.copy(qbin_args) #just for brevity when using it later
     sigqdata = np.interp(qdata,q,sigq)
+
 
     scale_factor = ne**2 / Idata[0]
     Idata *= scale_factor
@@ -1746,6 +1766,9 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
     supportV = np.zeros((steps+1))
     support = np.ones(x.shape,dtype=bool)
 
+    #support = lig_mask
+
+
     if seed is None:
         #Have to reset the random seed to get a random in different from other processes
         prng = np.random.RandomState()
@@ -1755,7 +1778,45 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
 
     prng = np.random.RandomState(seed)
 
-    #rho_start = ref_rho
+    # Determine patches
+    qpatch_labels = np.zeros_like(qbin_labels)
+    qxyz = np.array([qx.flatten(), qy.flatten(), qz.flatten()]).T
+    unitr = raster_unit_sphere(num_patch)
+    #print(unitr)
+    closest_patch = np.argmax(qxyz @ unitr.T, axis=1)
+    scale_patch_n = np.random.randint(0, num_patch, (steps, 5))
+
+    # Plotting the patches
+    """
+    print(qxyz.shape)
+    print(closest_patch.shape)
+    import matplotlib.pyplot as plt
+    from mpl_toolkits import mplot3d
+    for q in np.unique(qbin_labels):
+        qsel = (qbin_labels==q).flatten()
+       
+        fig = plt.figure(dpi=300)
+        ax = plt.axes(projection='3d')
+        for p in range(len(unitr)):
+            qshell = np.where(closest_patch[qsel]==p)
+            #print(qshell)
+            
+            ax.plot3D(qxyz[qsel][qshell[0], 0],
+                      qxyz[qsel][qshell[0], 1],
+                      qxyz[qsel][qshell[0], 2],'o', markersize=3, alpha=0.5)
+        fig.savefig(f'test{int(q)}.png')
+    #ax.view_init(elev=90, azim=0)
+
+    print(qxyz.shape)
+
+
+    exit()
+    """
+
+    #for i in np.unique(closest_patch):
+    #    print(i, np.sum(closest_patch == i))
+
+    #rho_start = ligand_ref
 
     if rho_start is not None:
         rho = rho_start
@@ -1851,8 +1912,13 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
 
     np.set_printoptions(formatter={'float': lambda x: format(x, '.3E')})
 
+    #for ql in np.unique(qbin_labels):
+    #    print(ql, np.sum(qbin_labels==ql))
+
+    
 
     if DENSS_GPU:
+        print('Transferring numpy arrays to cupy arrays ...')
         rho = cp.array(rho)
         ref_rho = cp.array(ref_rho)
         lig_mask = cp.array(lig_mask)
@@ -1865,17 +1931,19 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
         chi = cp.array(chi)
         supportV = cp.array(supportV)
         Imean = cp.array(Imean)
+        scale_patch_n = cp.array(scale_patch_n)
+        closest_patch = cp.array(closest_patch)
+        #F_mask = myabs(myfftn(lig_mask, DENSS_GPU=DENSS_GPU), DENSS_GPU=DENSS_GPU)**2
+        #F_mask /= F_mask.max()
+        #F_mask = mysqrt(F_mask, DENSS_GPU=DENSS_GPU)
+        #print(f'Done, F_mask: [{F_mask.min():.2f}, {F_mask.max():.2f}]')
+        print(f'Done')
+
+    print(f'closest_patch has the shape of {closest_patch.shape}')
 
     # Process initial guess
     rho = rho * lig_mask # First zero density outside of box
     rho = rho / mysum(rho, DENSS_GPU=DENSS_GPU) * lig_ne 
-
-
-    # Determine patches (DH)
-    qpatch_labels = np.zeros_like(qbin_labels)
-    qxyz = np.array([qx.flatten(), qy.flatten(), qz.flatten()]).T
-    unitr = raster_unit_sphere(num_patch)
-    closest_patch = np.argmax(qxyz @ unitr.T, axis=1)
 
     shift_tab = np.zeros(3)
 
@@ -1886,13 +1954,12 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
                 return []
 
         F = myfftn(rho+ref_rho, DENSS_GPU=DENSS_GPU)
-        #ref_F = myfftn(ref_rho, DENSS_GPU=DENSS_GPU)
+        ref_F = myfftn(ref_rho, DENSS_GPU=DENSS_GPU)
          
         #sometimes, when using denss.refine.py with non-random starting rho,
         #the resulting Fs result in zeros in some locations and the algorithm to break
         #here just make those values to be 1e-16 to be non-zero
         F[myabs(F, DENSS_GPU=DENSS_GPU)==0] = 1e-16
-        #ref_F[myabs(ref_F, DENSS_GPU=DENSS_GPU)==0] = 1e-16
 
         #APPLY RECIPROCAL SPACE RESTRAINTS
         #calculate spherical average of intensities from 3D Fs
@@ -1900,50 +1967,56 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
         I3D = myabs(F, DENSS_GPU=DENSS_GPU)**2
         Imean = mybinmean(I3D, qbin_labels, DENSS_GPU=DENSS_GPU)
 
-        #I3D = myabs(ref_F * F, DENSS_GPU=DENSS_GPU)
-        #Imean = mybinmean(I3D, qbin_labels, DENSS_GPU=DENSS_GPU)
-
-        #ref_I3D = myabs(ref_F, DENSS_GPU=DENSS_GPU)**2
-        #ref_Imean = mybinmean(ref_I3D, qbin_labels, DENSS_GPU=DENSS_GPU)
+        chi[j] = mysum(((Imean[qba]-Idata[qba])/sigqdata[qba])**2, DENSS_GPU=DENSS_GPU)/Idata[qba].size
 
 
- 
-        #scale Fs to match data
-        #factors = myones((len(qbins)))
-        factors = mysqrt(Idata/Imean, DENSS_GPU=DENSS_GPU)
+         
 
-        # Idata = (F_protein + alpha F_ligand)**2 
-        #       ~ F_protein**2 + 2 * alpha * F_ligand * F_protein
-        #       = ref_Imean + 2 * alpha * F_ligand * F_protein
-        #       = ref_Imean + 2 * alpha * Icross
-        # (Idata - ref_Imean) / 2 / Icross = alpha
-        #factors = mysqrt(Idata / (ref_Imean + Imean * 2), DENSS_GPU=DENSS_GPU) 
-        #factors = ((Idata - ref_Imean) / Imean / 2.0)
-        factors_single = factors.copy() 
-
-        factors = factors[qbin_labels]
         if (j > reg_kick_in) and (reg_scaling):
             if (j % reg_kick_freq) == 0:
-                for idx, q in enumerate(np.unique(qbin_labels)):
+                # What this part does is just select a random patch to allow it to scale differently
+                # The overall I is still scaled outside of this loop
+
+                # First, select a patch to scale first
+                for idx, patch_n in enumerate(scale_patch_n[j]):
+#                patch_n = scale_patch_n[j] # integer
+                    if idx == 0: 
+                        print(f'Scaling patch {patch_n:2d}, step {j}', end=' ')
+                    
+                    # Calculate binned mean of that patch
+                    Isum_this = mypadbinsum(I3D.ravel()[closest_patch==patch_n], qbin_labels.ravel()[closest_patch==patch_n], nbins+1, DENSS_GPU=DENSS_GPU)
+                    # Calculate binned mean of !that patch
+                    Isum_rest = mypadbinsum(I3D.ravel()[closest_patch!=patch_n], qbin_labels.ravel()[closest_patch!=patch_n], nbins+1, DENSS_GPU=DENSS_GPU)
+    
+                    Idata3D = Idata[qbin_labels]
+                    Isum_data = mypadbinsum(Idata3D.ravel(), qbin_labels.ravel(), nbins+1, DENSS_GPU=DENSS_GPU)
+    
+                    #print(Imean_this.shape, Imean_rest.shape, Idata.shape)
+                    # Calculate scaling factor of that patch, to (Idata - mean(!that patch))
+                    factors_this = mysqrt(Isum_this / (Isum_data - Isum_rest), DENSS_GPU=DENSS_GPU) #FIXME: Get the scaling right
+                    # Limit to a preset limit of 0.2 - 5
+                    factors_this[Isum_data <= Isum_rest] = 0.2
+                    factors_this[cp.isnan(factors_this)] = 1
+                    factors_this[factors_this < 0.2] = 0.2
+                    factors_this[factors_this > 5] = 5
+                    #factors_this = factors_this[qbin_labels.ravel()] * F_mask.ravel() + (1 - F_mask.ravel())
                     if idx == 0:
-                        pass
-                    elif idx == 10:
-                        if reg_method == "slice":
-                            factors[qbin_labels==q] = slice_scaling(Idata[q], F[qbin_labels==q], factors[qbin_labels==q], reg_coeff, num_patch, opt_method, include_lenx, print_res=True)
-                        elif reg_method == "patch":
-                            factors[qbin_labels==q] = patch_scaling(Idata[q], F[qbin_labels==q], factors_single[idx], closest_patch[(qbin_labels==q).flatten()], reg_coeff, num_patch, opt_method, include_lenx, print_res=True)
-                    elif idx < 10:
-                        if reg_method == "slice":
-                            factors[qbin_labels==q] = slice_scaling(Idata[q], F[qbin_labels==q], factors[qbin_labels==q], reg_coeff, num_patch, opt_method, include_lenx, print_res=False)
-                        elif reg_method == "patch":
-                            factors[qbin_labels==q] = patch_scaling(Idata[q], F[qbin_labels==q], factors_single[idx], closest_patch[(qbin_labels==q).flatten()], reg_coeff, num_patch, opt_method, include_lenx, print_res=False)
+                        print(f'{factors_this.min():.2f}, {factors_this.max():.2f}', end=' ')
+                    # Multiply that patch with this scaling factor
+                    I3D = myabs(F, DENSS_GPU=DENSS_GPU)**2
+                    if idx == 0: 
+                        print(f'{cp.sum(I3D):.2f} ->', end=' ')
+                    F.ravel()[closest_patch==patch_n] *= factors_this[qbin_labels.ravel()][closest_patch==patch_n]
+                    #F.ravel()[closest_patch==patch_n] *= factors_this.ravel()[closest_patch==patch_n]
+                    I3D = myabs(F, DENSS_GPU=DENSS_GPU)**2
+                    if idx == 0: 
+                        print(f'{cp.sum(I3D):.2f}', end=' ')
+                    Imean = mybinmean(I3D, qbin_labels, DENSS_GPU=DENSS_GPU)
 
+        #scale Fs to match data
+        factors = mysqrt(Idata/Imean, DENSS_GPU=DENSS_GPU)
+        F *= factors[qbin_labels]
 
-        F *= factors
-#        F *= factors[qbin_labels]
-
-        chi[j] = mysum(((Imean[qba]-Idata[qba])/sigqdata[qba])**2, DENSS_GPU=DENSS_GPU)/Idata[qba].size
-        #chi[j] = mysum(((Imean[qba]*2+ref_Imean[qba]-Idata[qba])/sigqdata[qba])**2, DENSS_GPU=DENSS_GPU)/Idata[qba].size
         #APPLY REAL SPACE RESTRAINTS
         rhoprime = myifftn(F, DENSS_GPU=DENSS_GPU)
         rhoprime = rhoprime.real
@@ -1971,18 +2044,27 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
             rg[j] = rho2rg(rhoprime,r=r,support=support,dx=dx)
 
         newrho = myzeros(rho.shape, DENSS_GPU=DENSS_GPU)
-
-
-        #Error Reduction
-        newrho[support] = rhoprime[support]
-        newrho[~support] = 0.0
+        beta = 0.9
+        
+        if ((j)//100) % 2 == 0: # Do error reduction
+            if ((j) % 100) == 0:
+                print("Switch to ER")
+            #Error Reduction
+            newrho[support] = rhoprime[support]
+            newrho[~support] = 0.0 
+        else: # Do HIO
+            if ((j) % 100) == 0:
+                print("Switch to HIO")
+            newrho[support] = rhoprime[support]
+            newrho[~support] = rho[~support] - beta * rhoprime[~support]
 
         #enforce positivity by making all negative density points zero.
         if positivity:
             netmp = mysum(newrho, DENSS_GPU=DENSS_GPU)
             newrho[newrho<0] = 0.0
             if mysum(newrho, DENSS_GPU=DENSS_GPU) != 0:
-                newrho *= netmp / mysum(newrho, DENSS_GPU=DENSS_GPU)
+                #newrho *= netmp / mysum(newrho, DENSS_GPU=DENSS_GPU)
+                newrho = newrho / mysum(newrho, DENSS_GPU=DENSS_GPU) * lig_ne
 
         #apply non-crystallographic symmetry averaging
         if ncs != 0 and j in ncs_steps:
@@ -2051,7 +2133,8 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
 
         if recenter and j in recenter_steps:
             if DENSS_GPU:
-                newrho = cp.asnumpy(newrho + ref_rho)
+                #newrho = cp.asnumpy(newrho + ref_rho)
+                newrho = cp.asnumpy(newrho)
                 support = cp.asnumpy(support)
                 lig_mask = cp.asnumpy(lig_mask)
                 ref_rho = cp.asnumpy(ref_rho)
@@ -2076,7 +2159,8 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
                 support = cp.array(support)
                 lig_mask = cp.array(lig_mask)
                 ref_rho = cp.array(ref_rho)
-                newrho = cp.array(newrho) - ref_rho
+                #newrho = cp.array(newrho) - ref_rho
+                newrho = cp.array(newrho)
 
         #update support using shrinkwrap method
         if shrinkwrap and j >= shrinkwrap_minstep and j%shrinkwrap_iter==1:
@@ -2258,9 +2342,9 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
     if np.sum(np.abs(rho[rho<0])) > np.sum(rho[rho>0]):
         rho *= -1
 
-    #scale total number of electrons
+    #scale total number of electrons - ligand electrons (DH)
     if ne is not None:
-        rho *= ne / np.sum(rho)
+        rho *= lig_ne / np.sum(rho)
 
     rg[j+1] = rho2rg(rho=rho,r=r,support=support,dx=dx)
     supportV[j+1] = supportV[j]
@@ -4394,6 +4478,40 @@ def patch_scaling(Idata, F, factor, patch_map, beta, num_patch, opt_method, incl
 
     return factors_new[patch_map]
 
+def patch_scaling_gpu(Idata, F, factor, patch_map, beta, num_patch, opt_method, include_lenx, print_res=False):
+    # GPU version of the patch scaling. All matrices come in as cp.array
+    # Idata is a float number
+    # F is a vectorized shell of vertices
+    # factor is a float number (uniform scaling factor as the initial guess)
+    # patch_map is a labeling vector the same length as F
+    # beta is regularization factor
+    def scaling_loss_function(x, Idata, F, patch_map, beta, num_patch, include_lenx, evaluate=False):
+        lenx = len(x)
+        x_new = x[patch_map] 
+        if include_lenx:
+            if not evaluate:
+                return cp.square(cp.mean(cp.square(x_new*cp.abs(F))) - Idata) + lenx * beta * cp.sum(cp.square(cp.log10(x_new)))
+            else:
+                return cp.square(cp.mean(cp.square(x_new*cp.abs(F))) - Idata), lenx * beta * cp.sum(cp.square(cp.log10(x_new)))
+        else:
+            if not evaluate:
+                return cp.square(cp.mean(cp.square(x_new*cp.abs(F))) - Idata) + lenx * beta * cp.sum(cp.square(cp.log10(x_new)))
+            else:
+                return cp.square(cp.mean(cp.square(x_new*cp.abs(F))) - Idata), lenx * beta * cp.sum(cp.square(cp.log10(x_new)))
+    
+     
+    factors_new = optimize.minimize(scaling_loss_function, 
+                                    cp.ones(num_patch)*factor, 
+                                    (Idata, F, patch_map, beta, num_patch, include_lenx), 
+                                    #method='L-BFGS-B',
+                                    #method='Nelder-Mead', # Works
+                                    method=opt_method, # Works
+                                    #options={'gtol': 1e-3},
+                                    ).x
+    if print_res:
+        print(factors_new)
+
+    return factors_new[patch_map]
 
 def raster_unit_sphere(num=200):
     L = np.sqrt(num * np.pi);

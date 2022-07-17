@@ -11,6 +11,7 @@ setup(name='denss',
       packages=['saxstats'],
       scripts=[
       'bin/denss.py',
+      'bin/denss_ligand.py',
       'bin/denss.align.py',
       'bin/denss.align2xyz.py',
       'bin/denss.align_by_principal_axes.py',
