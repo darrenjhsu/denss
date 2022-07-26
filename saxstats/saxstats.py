@@ -1783,8 +1783,8 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
     qxyz = np.array([qx.flatten(), qy.flatten(), qz.flatten()]).T
     unitr = raster_unit_sphere(num_patch)
     #print(unitr)
-    closest_patch = np.argmax(qxyz @ unitr.T, axis=1)
-    scale_patch_n = np.random.randint(0, num_patch, (steps, 5))
+    closest_patch = np.argmax(qxyz @ unitr.T, axis=1).reshape(ref_rho.shape)
+    scale_patch_n = np.random.randint(0, num_patch, (steps, 1))
 
     # Plotting the patches
     """
@@ -1953,24 +1953,32 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
                 my_logger.info('Aborted!')
                 return []
 
-        F = myfftn(rho+ref_rho, DENSS_GPU=DENSS_GPU)
-        ref_F = myfftn(ref_rho, DENSS_GPU=DENSS_GPU)
+        #F = myfftn(rho+ref_rho, DENSS_GPU=DENSS_GPU)
+        F = myfftn(rho, DENSS_GPU=DENSS_GPU)
+        F_p = myfftn(ref_rho, DENSS_GPU=DENSS_GPU)
          
         #sometimes, when using denss.refine.py with non-random starting rho,
         #the resulting Fs result in zeros in some locations and the algorithm to break
         #here just make those values to be 1e-16 to be non-zero
         F[myabs(F, DENSS_GPU=DENSS_GPU)==0] = 1e-16
-
+        F_p[myabs(F_p, DENSS_GPU=DENSS_GPU)==0] = 1e-16
         #APPLY RECIPROCAL SPACE RESTRAINTS
         #calculate spherical average of intensities from 3D Fs
 
-        I3D = myabs(F, DENSS_GPU=DENSS_GPU)**2
-        Imean = mybinmean(I3D, qbin_labels, DENSS_GPU=DENSS_GPU)
+        I3D_p = myabs(F_p, DENSS_GPU=DENSS_GPU)**2
+        I3D_pl = myabs(F_p + F, DENSS_GPU=DENSS_GPU)**2
+        #Imean_p = mybinmean(I3D_p, qbin_labels, DENSS_GPU=DENSS_GPU)
+        Imean_pl = mybinmean(I3D_pl, qbin_labels, DENSS_GPU=DENSS_GPU)
 
-        chi[j] = mysum(((Imean[qba]-Idata[qba])/sigqdata[qba])**2, DENSS_GPU=DENSS_GPU)/Idata[qba].size
+        chi[j] = mysum(((Imean_pl[qba]-Idata[qba])/sigqdata[qba])**2, DENSS_GPU=DENSS_GPU)/Idata[qba].size
 
-
-         
+        # Now |rho_p_d + rho_l|^2 = |rho_p_d|^2 + |rho_l|^2 + 2 Re(rho_p_d * rho_l.conjugate)
+        # If we want to match data by only changing rho_l, then
+        # data - |rho_p_d|^2 ~ 2 Re(rho_p_d * rho_l_d.conjugate) [ignoring the |rho_l|^2 term]
+        # |rho_p_d + rho_l|^2 - |rho_p_d|^2 ~ 2 Re(rho_p_d * rho_l.conjugate) [ignoring the |rho_l|^2 term]
+        # Therefore, we scale rho_l by (data - |rho_p_d|^2) / (|rho_p_d + rho_l|^2 - |rho_p_d|^2)
+        #factors = (Idata - Imean_p) / (Imean_pl - Imean_p)
+        #F *= factors[qbin_labels]
 
         if (j > reg_kick_in) and (reg_scaling):
             if (j % reg_kick_freq) == 0:
@@ -1984,16 +1992,16 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
                         print(f'Scaling patch {patch_n:2d}, step {j}', end=' ')
                     
                     # Calculate binned mean of that patch
-                    Isum_this = mypadbinsum(I3D.ravel()[closest_patch==patch_n], qbin_labels.ravel()[closest_patch==patch_n], nbins+1, DENSS_GPU=DENSS_GPU)
+                    Isum_this = mypadbinsum(I3D_pl[closest_patch==patch_n], qbin_labels[closest_patch==patch_n], nbins+1, DENSS_GPU=DENSS_GPU)
                     # Calculate binned mean of !that patch
-                    Isum_rest = mypadbinsum(I3D.ravel()[closest_patch!=patch_n], qbin_labels.ravel()[closest_patch!=patch_n], nbins+1, DENSS_GPU=DENSS_GPU)
+                    Isum_rest = mypadbinsum(I3D_pl[closest_patch!=patch_n], qbin_labels[closest_patch!=patch_n], nbins+1, DENSS_GPU=DENSS_GPU)
     
                     Idata3D = Idata[qbin_labels]
-                    Isum_data = mypadbinsum(Idata3D.ravel(), qbin_labels.ravel(), nbins+1, DENSS_GPU=DENSS_GPU)
+                    Isum_data = mypadbinsum(Idata3D, qbin_labels, nbins+1, DENSS_GPU=DENSS_GPU)
     
                     #print(Imean_this.shape, Imean_rest.shape, Idata.shape)
                     # Calculate scaling factor of that patch, to (Idata - mean(!that patch))
-                    factors_this = mysqrt(Isum_this / (Isum_data - Isum_rest), DENSS_GPU=DENSS_GPU) #FIXME: Get the scaling right
+                    factors_this = mysqrt((Isum_data - Isum_rest)/Isum_this, DENSS_GPU=DENSS_GPU)
                     # Limit to a preset limit of 0.2 - 5
                     factors_this[Isum_data <= Isum_rest] = 0.2
                     factors_this[cp.isnan(factors_this)] = 1
@@ -2003,22 +2011,24 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
                     if idx == 0:
                         print(f'{factors_this.min():.2f}, {factors_this.max():.2f}', end=' ')
                     # Multiply that patch with this scaling factor
-                    I3D = myabs(F, DENSS_GPU=DENSS_GPU)**2
-                    if idx == 0: 
-                        print(f'{cp.sum(I3D):.2f} ->', end=' ')
-                    F.ravel()[closest_patch==patch_n] *= factors_this[qbin_labels.ravel()][closest_patch==patch_n]
-                    #F.ravel()[closest_patch==patch_n] *= factors_this.ravel()[closest_patch==patch_n]
-                    I3D = myabs(F, DENSS_GPU=DENSS_GPU)**2
-                    if idx == 0: 
-                        print(f'{cp.sum(I3D):.2f}', end=' ')
-                    Imean = mybinmean(I3D, qbin_labels, DENSS_GPU=DENSS_GPU)
+                    #I3D = myabs(F, DENSS_GPU=DENSS_GPU)**2
+                    #if idx == 0: 
+                    #    print(f'{cp.sum(I3D):.2f} ->', end=' ')
+                    F[closest_patch==patch_n] *= factors_this[qbin_labels][closest_patch==patch_n]
+                    F_p[closest_patch==patch_n] *= factors_this[qbin_labels][closest_patch==patch_n]
+                    I3D_pl = myabs(F + F_p, DENSS_GPU=DENSS_GPU)**2
+                    #if idx == 0: 
+                    #    print(f'{cp.sum(I3D):.2f}', end=' ')
+                    Imean_pl = mybinmean(I3D_pl, qbin_labels, DENSS_GPU=DENSS_GPU)
 
         #scale Fs to match data
-        factors = mysqrt(Idata/Imean, DENSS_GPU=DENSS_GPU)
+        factors = mysqrt(Idata/Imean_pl, DENSS_GPU=DENSS_GPU)
         F *= factors[qbin_labels]
+        #F += F_p * (factors[qbin_labels] - 1) # Move all adjustments on apo protein to ligand
+        F_p *= factors[qbin_labels] # Otherwise regular scaling on apo FF
 
         #APPLY REAL SPACE RESTRAINTS
-        rhoprime = myifftn(F, DENSS_GPU=DENSS_GPU)
+        rhoprime = myifftn(F+F_p, DENSS_GPU=DENSS_GPU)
         rhoprime = rhoprime.real
         # Nothing outside of the box gets changed
         #rhoprime[~lig_mask] = ref_rho[~lig_mask]
@@ -2313,10 +2323,13 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
         rho = np.roll(np.roll(np.roll(rho, -shift_tab[0], axis=0), -shift_tab[1], axis=1), -shift_tab[2], axis=2)
         ref_rho = np.roll(np.roll(np.roll(ref_rho, -shift_tab[0], axis=0), -shift_tab[1], axis=1), -shift_tab[2], axis=2)
 
-    F = np.fft.fftn(rho+ref_rho)
-    #ref_F = np.fft.fftn(ref_rho)
+
+    F = np.fft.fftn(rho)
+    F_p = np.fft.fftn(ref_rho)
     #calculate spherical average intensity from 3D Fs
-    Imean = ndimage.mean(np.abs(F)**2, labels=qbin_labels, index=np.arange(0,qbin_labels.max()+1))
+    #Imean_l = ndimage.mean(np.abs(F)**2, labels=qbin_labels, index=np.arange(0,qbin_labels.max()+1))
+    #Imean_p = ndimage.mean(np.abs(F_p)**2, labels=qbin_labels, index=np.arange(0,qbin_labels.max()+1))
+    Imean_pl = ndimage.mean(np.abs(F+F_p)**2, labels=qbin_labels, index=np.arange(0,qbin_labels.max()+1))
     #Imean = ndimage.mean(np.abs(F * ref_F), labels=qbin_labels, index=np.arange(0,qbin_labels.max()+1))
     #ref_Imean = ndimage.mean(np.abs(ref_F)**2, labels=qbin_labels, index=np.arange(0,qbin_labels.max()+1))
     #chi[j+1] = np.sum(((Imean[j+1,qbin_args]-Idata)/sigqdata)**2)/qbin_args.size
@@ -2324,9 +2337,12 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
     #scale Fs to match data
     #factors = np.ones((len(qbins)))
     #factors = np.sqrt(Idata/(ref_Imean + Imean * 2))
-    factors = np.sqrt(Idata/Imean)
+    factors = np.sqrt(Idata/Imean_pl)
+    #factors = (Idata - Imean_p) / (Imean_pl - Imean_p)
     F *= factors[qbin_labels]
-    rho = np.fft.ifftn(F,rho.shape)
+    F_p *= factors[qbin_labels]
+    #F += F_p * (factors[qbin_labels] - 1)
+    rho = np.fft.ifftn(F + F_p,rho.shape)
     rho = rho.real
     #rho[~lig_mask] = ref_rho[~lig_mask]
     rho = rho - ref_rho
@@ -2393,7 +2409,7 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
     fit[:len(qdata),0] = qdata
     fit[:len(Idata),1] = Idata
     fit[:len(sigqdata),2] = sigqdata
-    fit[:len(Imean),3] = Imean
+    fit[:len(Imean_pl),3] = Imean_pl
     np.savetxt(fprefix+'_map.fit', fit, delimiter=' ', fmt='%.5e'.encode('ascii'),
         header='q(data),I(data),error(data),I(density)')
 
@@ -2416,11 +2432,11 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
     #return original unscaled values of Idata (and therefore Imean) for comparison with real data
     Idata /= scale_factor
     sigqdata /= scale_factor
-    Imean /= scale_factor
+    Imean_pl /= scale_factor
     I /= scale_factor
     sigq /= scale_factor
 
-    return qdata, Idata, sigqdata, qbinsc, Imean, chi, rg, supportV, rho, side
+    return qdata, Idata, sigqdata, qbinsc, Imean_pl, chi, rg, supportV, rho, side
 
 def shrinkwrap_by_density_value(rho,absv=True,sigma=3.0,threshold=0.2,recenter=True,recenter_mode="com"):
     """Create support using shrinkwrap method based on threshold as fraction of maximum density
