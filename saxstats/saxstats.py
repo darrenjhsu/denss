@@ -1669,6 +1669,9 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
     else:
         raise ValueError
 
+    lig_mask_xyz = np.array([x.flatten(), y.flatten(), z.flatten()]).T[lig_mask.flatten()]
+    print(lig_mask_xyz.shape)
+
     no_overlap_with_ref_rho = 1
 
     # TODO Maybe further filter by ref_rho - no overlap is allowed
@@ -1952,6 +1955,14 @@ def denss_ligand(q, I, sigq, dmax, ref_rho,
             if abort_event.is_set():
                 my_logger.info('Aborted!')
                 return []
+
+        rho_guess = np.zeros_like(ref_rho)
+        while rho_guess[lig_mask].sum() < 10:
+            #cen_guess = 
+            sigma = np.random.random() * 1.8 + 0.2
+            rho_guess = np.sqrt(2 * np.pi)**3 / sigma**3 * np.exp(- dist2_from_cen(cen_guess, x, y, z) / 2 / sigma**2)
+            
+
 
         #F = myfftn(rho+ref_rho, DENSS_GPU=DENSS_GPU)
         F = myfftn(rho, DENSS_GPU=DENSS_GPU)
