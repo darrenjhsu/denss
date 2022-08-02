@@ -122,11 +122,11 @@ def parse_arguments(parser):
 
     #A bug appears to be present when disabling the porod extrapolation.
     #for now that option will be disabled until I come up with a fix
-    if args.extrapolate is False:
-        print ("There is currently a bug when disabling the Porod "
-               "extrapolation (the -e_off option). \n For now, extrapolation "
-               "has been re-enabled until a bug fix is released. ")
-        args.extrapolate = True
+    #if args.extrapolate is False:
+    #    print ("There is currently a bug when disabling the Porod "
+    #           "extrapolation (the -e_off option). \n For now, extrapolation "
+    #           "has been re-enabled until a bug fix is released. ")
+    #    args.extrapolate = True
 
     q, I, sigq, Ifit, file_dmax, isfit = saxs.loadProfile(args.file, units=args.units)
     Iq = np.zeros((q.size,3))

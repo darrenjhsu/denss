@@ -12,6 +12,7 @@ setup(name='denss',
       scripts=[
       'bin/denss.py',
       'bin/denss_ligand.py',
+      'bin/denss_ligand_real.py',
       'bin/denss.align.py',
       'bin/denss.align2xyz.py',
       'bin/denss.align_by_principal_axes.py',

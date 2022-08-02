@@ -1,0 +1,14 @@
+python ../bin/denss_ligand_real.py \
+        -f 2cm7.dat \
+        -o junk \
+        -ref 2cm7_apo.mrc \
+        -gpu \
+        --ligand_center 11.01 -4.25 -11.10 \
+        -rc_off \
+        --ncs 0 \
+        --ne -1 \
+        --extrapolate_off \
+        --ligand_mask_mode template \
+        --ligand_template 2cm7_ligand.mrc \
+        --seed 42
+
