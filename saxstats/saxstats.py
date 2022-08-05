@@ -2504,6 +2504,8 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
             print("GPU option set, but CuPy failed to load")
         DENSS_GPU = False
 
+    do_ec_next_step = False
+
     fprefix = os.path.join(path, output)
 
     D = dmax
@@ -2832,24 +2834,27 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
 
         # TODO: Post this function
         factor = res_func_analytical(Idata, Imean_p[qba], Imean_c[qba], Imean_g[qba], sigqdata, DENSS_GPU=DENSS_GPU)
-        print(f'{factor:2f}', end=' ')
+        #print(f'{factor:2f}', end=' ')
         rho_guess_mod = rho_guess * factor
-        rho_guess_mod[~lig_mask] = 0
-        F_a = myfftn(ref_rho + rho + rho_guess_mod, DENSS_GPU=DENSS_GPU)
+        rho_guess_mod[~lig_mask] = 0 
+        rho_guess_test = rho_guess_mod + rho
+        rho_guess_test[rho_guess_test < 0] = 0 # TODO: Could be that this cannot be lower than the negative of prior density
+        #rho_guess_test = cp.maximum(rho_guess_test, -ref_rho) # TODO: Could be that this cannot be lower than the negative of prior density
+        F_a = myfftn(ref_rho + rho_guess_test, DENSS_GPU=DENSS_GPU)
         I3D_a = myabs(F_a, DENSS_GPU=DENSS_GPU)**2
         Imean_a = mybinmean(I3D_a, qbin_labels, DENSS_GPU=DENSS_GPU)
 
         chi_int = np.sum(((Imean_a[qba]-Idata)/sigqdata)**2)/Idata.size
         
         if chi_int > chi[j]:
-            print('X', end='')
+            #print('X', end='')
+            if j in enforce_connectivity_steps and enforce_connectivity:
+                do_ec_next_step = True # Because this continue statement may accidentally skip enforce connectivity
             continue
         else:
-            if j%200 == 0 and j > 0:
-                print(f'Timing: {time.time() - t0:.2f} s', end=' ')
-            rho += rho_guess_mod
-            rho[rho < 0] = 0
-            rho[~lig_mask] = 0
+            if j%500 == 0 and j > 0:
+                print(f'Timing: {time.time() - t0:.2f} s', end='\n')
+            rho = rho_guess_test
 
         rhoprime = rho 
 
@@ -2872,7 +2877,9 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
 
 
 
-        if enforce_connectivity and j in enforce_connectivity_steps:
+        if enforce_connectivity and j in enforce_connectivity_steps or do_ec_next_step:
+            do_ec_next_step = False
+            print("Let's enforce connectivity", end=' ')
             if DENSS_GPU:
                 newrho = cp.asnumpy(rho)
 
