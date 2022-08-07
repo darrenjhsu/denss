@@ -2505,6 +2505,11 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
         DENSS_GPU = False
 
     do_ec_next_step = False
+    do_sw_next_step = False
+
+
+    # Print some diagnostic things
+    print(f'Input q has a shape of {q.shape}, I {I.shape}')
 
     fprefix = os.path.join(path, output)
 
@@ -2584,7 +2589,7 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     maxy = np.max(y[lig_mask])
     minz = np.min(z[lig_mask])
     maxz = np.max(z[lig_mask])
-    print(f'Mask dimensions: {minx}, {maxx}, {miny}, {maxy}, {minz}, {maxz}')
+    #print(f'Mask dimensions: {minx}, {maxx}, {miny}, {maxy}, {minz}, {maxz}')
 
 
 
@@ -2611,10 +2616,12 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     qdata = qbinsc[np.where( (qbinsc>=q.min()) & (qbinsc<=q.max()) )]
     Idata = np.interp(qdata,q,I)
 
+    #print(f'qdata has a shape of {qdata.shape}, and Idata {Idata.shape}')
+
+
     # Calculate excess electrons that should be for active search region
     Idata_ne = np.sqrt(Idata[0])
     lig_ne = Idata_ne - np.sum(ref_rho)
-
 
     if extrapolate:
         print('### WARNING: data has been extrapolated ###')
@@ -2628,6 +2635,9 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     qbin_args = np.in1d(qbinsc,qdata,assume_unique=True)
     qba = np.copy(qbin_args) #just for brevity when using it later
     sigqdata = np.interp(qdata,q,sigq)
+
+    #for i,j,k in zip(qdata, Idata, sigqdata):
+    #    print(i,j,k)
 
 
     scale_factor = ne**2 / Idata[0]
@@ -2665,11 +2675,13 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
 
     prng = np.random.RandomState(seed)
 
-    lig_cen_list = np.array([minx + (maxx-minx) * np.random.random(steps*3),
-                             miny + (maxy-miny) * np.random.random(steps*3),
-                             minz + (maxz-minz) * np.random.random(steps*3)]).T
-    print(lig_cen_list.shape)
-
+    #lig_cen_list = np.array([minx + (maxx-minx) * np.random.random(steps*5),
+    #                         miny + (maxy-miny) * np.random.random(steps*5),
+    #                         minz + (maxz-minz) * np.random.random(steps*5)]).T
+    #print(lig_cen_list.shape)
+    random_voxel_idx = np.random.choice(range(np.sum(lig_mask)), 5*steps)
+    random_voxel = np.transpose(np.where(lig_mask))[random_voxel_idx]
+    #print(random_voxel.shape, random_voxel[:3])
 
     if rho_start is not None:
         rho = rho_start
@@ -2769,7 +2781,7 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     
 
     if DENSS_GPU:
-        print('Transferring numpy arrays to cupy arrays ...')
+        print('Transferring numpy arrays to cupy arrays ...', end=' ')
         rho = cp.array(rho) # Accumulated electron density
         ref_rho = cp.array(ref_rho) # Apo protein
         rho_guess = cp.array(rho_guess) # Guess from each step
@@ -2786,7 +2798,8 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
         x = cp.array(x)
         y = cp.array(y)
         z = cp.array(z)
-        lig_cen_list = cp.array(lig_cen_list)
+        #lig_cen_list = cp.array(lig_cen_list)
+        random_voxel = cp.array(random_voxel)
         print(f'Done')
 
 
@@ -2804,12 +2817,34 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
                 my_logger.info('Aborted!')
                 return []
 
-        rho_guess *= 0
-        while mysum(rho_guess[lig_mask], DENSS_GPU=DENSS_GPU) < 0.3:
-            lig_cen = lig_cen_list[lig_cen_idx]
-            lig_cen_idx += 1 
-            rho_guess = dist2_from_cen(lig_cen, x, y, z) < 1.5 # TODO: Make this adjustable 
-            rho_guess = rho_guess * 1 / np.sum(rho_guess)
+        #TODO: Based on chi^2 improvement and after some pre-defined steps, assign some steps to error reduction
+
+        #rho_guess *= 0
+        #sigma_trial = 0.12 - min(0.1 * (j*2 / steps), 0.1)
+        lig_cen = cp.array([minx + (maxx-minx) * cp.random.random(),
+                             miny + (maxy-miny) * cp.random.random(),
+                             minz + (maxz-minz) * cp.random.random()]).T
+        #lig_cen_idx += 1
+        rho_guess = dist2_from_cen(lig_cen, x, y, z) < (1.5 - 0.6 * (min( j*1.5 / steps, 1))) # TODO: Make this adjustable
+        #rho_guess = np.sqrt(2 * np.pi)**3 / sigma_trial**3 * np.exp(- dist2_from_cen(lig_cen, x, y, z) / 2 / sigma_trial**2)
+        #if mysum(rho_guess, DENSS_GPU=DENSS_GPU) > 0: 
+        if 1: 
+            rho_guess = rho_guess * 1 / mysum(rho_guess)
+
+        #v_idx = random_voxel[lig_cen_idx]
+        #rho_guess[v_idx[0], v_idx[1], v_idx[2]] = 1
+
+        while mysum(rho_guess[lig_mask*support], DENSS_GPU=DENSS_GPU) < 0.3:
+            lig_cen = cp.array([minx + (maxx-minx) * cp.random.random(),
+                             miny + (maxy-miny) * cp.random.random(),
+                             minz + (maxz-minz) * cp.random.random()]).T
+            rho_guess = dist2_from_cen(lig_cen, x, y, z) < (1.5 - 0.6 * (min( j*1.5 / steps, 1))) # TODO: Make this adjustable
+            #rho_guess = np.sqrt(2 * np.pi)**3 / sigma_trial**3 * np.exp(- dist2_from_cen(lig_cen, x, y, z) / 2 / sigma_trial**2)
+            #if mysum(rho_guess, DENSS_GPU=DENSS_GPU) > 0:  
+            if 1: # Because 0.9 A is always longer than voxel (1 A) * sqrt(3) / 2, the longest possible distance between a center and a voxel 
+                rho_guess = rho_guess * 1 / mysum(rho_guess)
+
+        #print(f'Adjusting {np.sum(rho_guess > 0)}', end=' ')
 
         F_p = myfftn(rho+ref_rho, DENSS_GPU=DENSS_GPU)
         F_g = myfftn(rho_guess, DENSS_GPU=DENSS_GPU)        
@@ -2820,7 +2855,7 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
         #F_p[myabs(F_p, DENSS_GPU=DENSS_GPU)==0] = 0
         #F_g[myabs(F_p, DENSS_GPU=DENSS_GPU)==0] = 0
 
-        #APPLY RECIPROCAL SPACE RESTRAINTS
+        #APPLY RECIPROCAL SPACE FITTING
         #calculate spherical average of intensities from 3D Fs
 
         I3D_p = myabs(F_p, DENSS_GPU=DENSS_GPU)**2  # Scattering intensity from prior (protein + ligand so far)
@@ -2837,24 +2872,34 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
         #print(f'{factor:2f}', end=' ')
         rho_guess_mod = rho_guess * factor
         rho_guess_mod[~lig_mask] = 0 
+        rho_guess_mod[~support] = 0 
         rho_guess_test = rho_guess_mod + rho
         rho_guess_test[rho_guess_test < 0] = 0 # TODO: Could be that this cannot be lower than the negative of prior density
         #rho_guess_test = cp.maximum(rho_guess_test, -ref_rho) # TODO: Could be that this cannot be lower than the negative of prior density
+        #rho_guess_test = rho_guess_test / mysum(rho_guess_test, DENSS_GPU=DENSS_GPU) * lig_ne
         F_a = myfftn(ref_rho + rho_guess_test, DENSS_GPU=DENSS_GPU)
         I3D_a = myabs(F_a, DENSS_GPU=DENSS_GPU)**2
         Imean_a = mybinmean(I3D_a, qbin_labels, DENSS_GPU=DENSS_GPU)
 
         chi_int = np.sum(((Imean_a[qba]-Idata)/sigqdata)**2)/Idata.size
+
+        if j%200 == 0 and j > 0:
+            t1 = time.time() - t0
+            if t1 < j:
+                print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s', end='\n')
+            else:
+                print(f'Timing: {t1:.2f} s, {t1/j:.2f} s / step', end='\n')
         
         if chi_int > chi[j]:
             #print('X', end='')
             if j in enforce_connectivity_steps and enforce_connectivity:
                 do_ec_next_step = True # Because this continue statement may accidentally skip enforce connectivity
+            if shrinkwrap and j >= shrinkwrap_minstep and j%shrinkwrap_iter==1:
+                do_sw_next_step = True
             continue
         else:
-            if j%500 == 0 and j > 0:
-                print(f'Timing: {time.time() - t0:.2f} s', end='\n')
             rho = rho_guess_test
+
 
         rhoprime = rho 
 
@@ -2876,8 +2921,47 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
             rg[j] = rho2rg(rhoprime,r=r,support=support,dx=dx)
 
 
+        #update support using shrinkwrap method
+        if (shrinkwrap and j >= shrinkwrap_minstep and j%shrinkwrap_iter==1) or do_sw_next_step:
+            do_sw_next_step = False
+            if DENSS_GPU:
+                newrho = cp.asnumpy(rho)
+                if j > shrinkwrap_minstep+1:
+                    support = cp.asnumpy(support)
+                    rg[j] = rho2rg(newrho,r=r,support=support,dx=dx)
 
-        if enforce_connectivity and j in enforce_connectivity_steps or do_ec_next_step:
+            if shrinkwrap_old_method:
+                #run the old method
+                if j>500:
+                    absv = True
+                else:
+                    absv = False
+                newrho, support = shrinkwrap_by_density_value(newrho,absv=absv,sigma=sigma,threshold=threshold,recenter=recenter,recenter_mode=recenter_mode)
+            else:
+                swN = int(swV/dV)
+                #end this stage of shrinkwrap when the volume is less than a sphere of radius D/2
+                if swbyvol and swV > swVend:
+                    newrho, support, threshold = shrinkwrap_by_volume(newrho,absv=True,sigma=sigma,N=swN,recenter=recenter,recenter_mode=recenter_mode)
+                    swV *= swV_decay
+                else:
+                    threshold = shrinkwrap_threshold_fraction
+                    if first_time_swdensity:
+                        if not quiet:
+                            if gui:
+                                my_logger.info("switched to shrinkwrap by density threshold = %.4f" %threshold)
+                            else:
+                                print("\nswitched to shrinkwrap by density threshold = %.4f" %threshold)
+                        first_time_swdensity = False
+                    newrho, support = shrinkwrap_by_density_value(newrho,absv=True,sigma=sigma,threshold=threshold,recenter=recenter,recenter_mode=recenter_mode)
+
+            if sigma > shrinkwrap_sigma_end:
+                sigma = shrinkwrap_sigma_decay*sigma
+
+            if DENSS_GPU:
+                newrho = cp.array(newrho)
+                support = cp.array(support)
+
+        if (enforce_connectivity and j in enforce_connectivity_steps) or do_ec_next_step:
             do_ec_next_step = False
             print("Let's enforce connectivity", end=' ')
             if DENSS_GPU:
@@ -2897,7 +2981,7 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
                     newrho, support = shrinkwrap_by_density_value(newrho,absv=True,sigma=sigma,threshold=threshold,recenter=recenter,recenter_mode=recenter_mode)
 
             #label the support into separate segments based on a 3x3x3 grid
-            struct = ndimage.generate_binary_structure(3, 3)
+            struct = ndimage.generate_binary_structure(3, 2)
             labeled_support, num_features = ndimage.label(support, structure=struct)
             sums = np.zeros((num_features))
             if not quiet:
@@ -2964,8 +3048,8 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
         rho *= -1
 
     #scale total number of electrons - ligand electrons (DH)
-    if ne is not None:
-        rho *= lig_ne / np.sum(rho)
+    #if ne is not None:
+    #    rho *= lig_ne / np.sum(rho)
 
     rg[j+1] = rho2rg(rho=rho,r=r,support=support,dx=dx)
     supportV[j+1] = supportV[j]
