@@ -84,22 +84,36 @@ def parse_arguments(parser):
     parser.set_defaults(DENSS_GPU = False)
     parser.set_defaults(plot=True)
 
-    parser.add_argument("--reg_scaling", action="store_true")           # Do regularized scaling
-    parser.set_defaults(reg_scaling = False)
-    parser.add_argument("--reg_method", default='patch')             # Choose between {slice, patch}
-    parser.add_argument("--opt_method", default='L-BFGS-B')       # Choose between {Nelder-Mead, L-BFGS-B}
-    parser.add_argument("--include_lenx", default=True)           # Include length of x
-    parser.add_argument("--reg_coeff", default=1, type=float)     # Regularization coefficient (e.g. 1, or 1e-3, or 10)
-    parser.add_argument("--num_patch", default=10, type=int)      # Number of patches if using patch reg method (e.g. 10 or 26)
-    parser.add_argument("--reg_kick_in", default=2000, type=int)  # At which step the regularized scaling kicks in (e.g. 2000 or 500)
-    parser.add_argument("--reg_kick_freq", default=1, type=int)   # How often does the reg scaling operate (every N steps, default 1)
+    #parser.add_argument("--reg_scaling", action="store_true")           # Do regularized scaling
+    #parser.set_defaults(reg_scaling = False)
+    #parser.add_argument("--reg_method", default='patch')             # Choose between {slice, patch}
+    #parser.add_argument("--opt_method", default='L-BFGS-B')       # Choose between {Nelder-Mead, L-BFGS-B}
+    #parser.add_argument("--include_lenx", default=True)           # Include length of x
+    #parser.add_argument("--reg_coeff", default=1, type=float)     # Regularization coefficient (e.g. 1, or 1e-3, or 10)
+    #parser.add_argument("--num_patch", default=10, type=int)      # Number of patches if using patch reg method (e.g. 10 or 26)
+    #parser.add_argument("--reg_kick_in", default=2000, type=int)  # At which step the regularized scaling kicks in (e.g. 2000 or 500)
+    #parser.add_argument("--reg_kick_freq", default=1, type=int)   # How often does the reg scaling operate (every N steps, default 1)
 
-    parser.add_argument("-ref", "--ref", default=None, type=str, help="Reference .mrc file for denss_ligand")
+    parser.add_argument("-ref", "--ref", default=None, type=str, help="Reference .mrc file for denss_ligand_real")
     parser.add_argument("--ligand_center", default=None, nargs=3, type=float, help="Center of ligand search box")
     parser.add_argument("--ligand_box_size", default=40, type=float, help="Side length of the search box for ligand density, in Angstrom")
     parser.add_argument("--ligand_mask_mode", default='cubic', type=str, help="Mask shape (cubic or sphere)")
     parser.add_argument("--ligand_template", default=None, type=str, help="Reference mask file name (maybe from a known ligand)")
 
+    parser.add_argument("--refine_mode", default='real', type=str, help='''[real / pip / switch / allq / refine]. 
+real = use real space refinement all the way.
+pip (performance improvement plan) = improve chi^2 fitting by assigning some steps to error reduction, must provide pip_threshold, pip_period, and refine_switch.
+switch = switch to error reduction at a specific step, must provide refine_switch.
+allq = use error reduction all the way.
+refine = use error reduction but starting with an averaged map, must provide rho_start.
+''')
+    parser.add_argument("--refine_switch", default=3000, type=int, help='Switching step when pip kicks in or real space method switches to error reduction')
+    parser.add_argument("--pip_threshold", default=0.1, type=float, help='The threshold where performance improvement plan kicks in (assigning some steps to error reduction')
+    parser.add_argument("--pip_period", default=200, type=int, help='Evaluation period for pip')
+    parser.add_argument("--dot_radius_start", default=1.8, type=float, help='Initial real space electron density dot size in Angstroms')
+    parser.add_argument("--dot_radius_end", default=0.9, type=float, help='Final real space electron density dot size in Angstroms. If this is too small (< sqrt(3) / 2 of voxel size) then the program may be slower due to multiple retries to create a trial density')
+    parser.add_argument("--dot_tuning", default=1.5, type=float, help='Speed of dot radius shrinkage. It is the dot will quadratically shrink to final radius at step (1 / dot_tuning) * steps, so higher value means more aggresive shrinking.')
+    parser.add_argument("--timing_period", default=200, type=int, help='Print timing every this step')
     args = parser.parse_args()
 
     if args.plot:

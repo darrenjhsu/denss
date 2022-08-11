@@ -2478,17 +2478,20 @@ def dist2_from_cen(center, meshx, meshy, meshz):
 def denss_ligand_real(q, I, sigq, dmax, ref_rho, 
     ligand_center, ligand_box_size=40, ligand_mask_mode='cubic', ligand_ref=None,
     ne=None, voxel=5., oversampling=3., recenter=True, recenter_steps=None,
-    recenter_mode="com", positivity=True, extrapolate=True, output="map",
+    recenter_mode="com", positivity=True, extrapolate=False, output="map",
     steps=None, seed=None, flatten_low_density=True, rho_start=None, add_noise=None,
     shrinkwrap=True, shrinkwrap_old_method=False,shrinkwrap_sigma_start=3,
     shrinkwrap_sigma_end=1.5, shrinkwrap_sigma_decay=0.99, shrinkwrap_threshold_fraction=0.2,
     shrinkwrap_iter=20, shrinkwrap_minstep=100, chi_end_fraction=0.01,
     write_xplor_format=False, write_freq=100, enforce_connectivity=True,
-    enforce_connectivity_steps=[500], cutout=True, quiet=False, ncs=0,
-    ncs_steps=[500],ncs_axis=1, ncs_type="cyclical",abort_event=None, my_logger=logging.getLogger(),
+    enforce_connectivity_steps=[2000,4000], cutout=True, quiet=False, 
+    #ncs=0, ncs_steps=[500],ncs_axis=1, ncs_type="cyclical",
+    abort_event=None, my_logger=logging.getLogger(),
     path='.', gui=False, DENSS_GPU=False,
-    reg_scaling=False, reg_method='patch', opt_method='L_BFGS_B', include_lenx=True,
-    reg_coeff=1.0, num_patch=10, reg_kick_in=2000, reg_kick_freq=1):
+    refine_mode='real', refine_switch=3000, pip_threshold=0.1, pip_period=200,
+    dot_radius_start=1.8, dot_radius_end=0.9, dot_tuning=1.5,
+    timing_period=200
+    ):
     """Calculate electron density from scattering data, using real space adjustments."""
     if abort_event is not None:
         if abort_event.is_set():
@@ -2675,13 +2678,20 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
 
     prng = np.random.RandomState(seed)
 
-    #lig_cen_list = np.array([minx + (maxx-minx) * np.random.random(steps*5),
-    #                         miny + (maxy-miny) * np.random.random(steps*5),
-    #                         minz + (maxz-minz) * np.random.random(steps*5)]).T
-    #print(lig_cen_list.shape)
-    random_voxel_idx = np.random.choice(range(np.sum(lig_mask)), 5*steps)
-    random_voxel = np.transpose(np.where(lig_mask))[random_voxel_idx]
-    #print(random_voxel.shape, random_voxel[:3])
+    if DENSS_GPU:
+        cp.random.seed(seed)
+
+    if refine_mode == 'real' or refine_mode == 'pip':
+        refine_schedule = np.array(['r'] * steps)
+    elif refine_mode == 'allq' or refine_mode == 'refine':
+        refine_schedule = np.array(['q'] * steps)
+    else:
+        raise ValueError("Refine mode must be 'real', 'pip', 'allq', or 'refine'")
+    if refine_mode == 'pip':
+        refine_schedule[:refine_switch] = 'q'
+
+    if refine_mode == 'refine' and rho_start is None:
+        raise ValueError("Refine mode 'refine' must be paired with a rho_start")
 
     if rho_start is not None:
         rho = rho_start
@@ -2719,6 +2729,7 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
         erode = True
         erosion_width = 5
 
+
     my_logger.info('q range of input data: %3.3f < q < %3.3f', q.min(), q.max())
     my_logger.info('Maximum dimension: %3.3f', D)
     my_logger.info('Sampling ratio: %3.3f', oversampling)
@@ -2728,9 +2739,6 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     my_logger.info('Recenter: %s', recenter)
     my_logger.info('Recenter Steps: %s', recenter_steps)
     my_logger.info('Recenter Mode: %s', recenter_mode)
-    my_logger.info('NCS: %s', ncs)
-    my_logger.info('NCS Steps: %s', ncs_steps)
-    my_logger.info('NCS Axis: %s', ncs_axis)
     my_logger.info('Positivity: %s', positivity)
     my_logger.info('Extrapolate high q: %s', extrapolate)
     my_logger.info('Shrinkwrap: %s', shrinkwrap)
@@ -2759,15 +2767,14 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     my_logger.info('Number of q shells: %i', nbins)
     my_logger.info('Width of q shells (angstroms^(-1)): %3.3f', qstep)
     my_logger.info('Random seed: %i', seed)
-    my_logger.info('Regularized scaling mode: %s', reg_scaling)
-    my_logger.info('Regularized scaling method: %s', reg_method)
-    my_logger.info('Optimization method: %s', opt_method)
-    my_logger.info('Including len(x): %s', include_lenx)
-    my_logger.info('Regularization beta: %3.3f', reg_coeff)
-    my_logger.info('Number of patches: %i', num_patch)
-    my_logger.info('Step when regularized scaling kicks in: %i', reg_kick_in)
-    my_logger.info('Frequency of regularized scaling: %i', reg_kick_freq)
-
+    my_logger.info('Refine mode: %s', refine_mode)
+    my_logger.info('Refine switch step: %i', refine_switch)
+    my_logger.info('Performance improvement plan threshold: %.2f', pip_threshold)
+    my_logger.info('Performance improvement plan period: %i', pip_period)
+    my_logger.info('Initial trial density dot radius: %.2f', dot_radius_start)
+    my_logger.info('Final trial density dot radius: %.2f', dot_radius_end)
+    my_logger.info('Dot shrinking period (%.2f) ends at step %.0f', dot_tuning, (1 / dot_tuning) * steps)
+    my_logger.info('Print timing period: %i', timing_period)
 
     if not quiet:
         if gui:
@@ -2798,8 +2805,6 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
         x = cp.array(x)
         y = cp.array(y)
         z = cp.array(z)
-        #lig_cen_list = cp.array(lig_cen_list)
-        random_voxel = cp.array(random_voxel)
         print(f'Done')
 
 
@@ -2808,7 +2813,6 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     rho = rho / mysum(rho, DENSS_GPU=DENSS_GPU) * lig_ne 
 
 
-    lig_cen_idx = 0
     t0 = time.time()
 
     for j in range(steps):
@@ -2818,90 +2822,127 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
                 return []
 
         #TODO: Based on chi^2 improvement and after some pre-defined steps, assign some steps to error reduction
-
-        #rho_guess *= 0
-        #sigma_trial = 0.12 - min(0.1 * (j*2 / steps), 0.1)
-        lig_cen = cp.array([minx + (maxx-minx) * cp.random.random(),
-                             miny + (maxy-miny) * cp.random.random(),
-                             minz + (maxz-minz) * cp.random.random()]).T
-        #lig_cen_idx += 1
-        rho_guess = dist2_from_cen(lig_cen, x, y, z) < (1.5 - 0.6 * (min( j*1.5 / steps, 1))) # TODO: Make this adjustable
-        #rho_guess = np.sqrt(2 * np.pi)**3 / sigma_trial**3 * np.exp(- dist2_from_cen(lig_cen, x, y, z) / 2 / sigma_trial**2)
-        #if mysum(rho_guess, DENSS_GPU=DENSS_GPU) > 0: 
-        if 1: 
-            rho_guess = rho_guess * 1 / mysum(rho_guess)
-
-        #v_idx = random_voxel[lig_cen_idx]
-        #rho_guess[v_idx[0], v_idx[1], v_idx[2]] = 1
-
-        while mysum(rho_guess[lig_mask*support], DENSS_GPU=DENSS_GPU) < 0.3:
+        if refine_schedule[j] == 'r':
+            #sigma_trial = 0.12 - min(0.1 * (j*2 / steps), 0.1)
             lig_cen = cp.array([minx + (maxx-minx) * cp.random.random(),
-                             miny + (maxy-miny) * cp.random.random(),
-                             minz + (maxz-minz) * cp.random.random()]).T
-            rho_guess = dist2_from_cen(lig_cen, x, y, z) < (1.5 - 0.6 * (min( j*1.5 / steps, 1))) # TODO: Make this adjustable
+                                 miny + (maxy-miny) * cp.random.random(),
+                                 minz + (maxz-minz) * cp.random.random()]).T
+            rho_guess = dist2_from_cen(lig_cen, x, y, z) < (dot_radius_start - (dot_radius_start - dot_radius_end) * (min( j * dot_tuning / steps, 1)))**2 
             #rho_guess = np.sqrt(2 * np.pi)**3 / sigma_trial**3 * np.exp(- dist2_from_cen(lig_cen, x, y, z) / 2 / sigma_trial**2)
-            #if mysum(rho_guess, DENSS_GPU=DENSS_GPU) > 0:  
-            if 1: # Because 0.9 A is always longer than voxel (1 A) * sqrt(3) / 2, the longest possible distance between a center and a voxel 
+            #if mysum(rho_guess, DENSS_GPU=DENSS_GPU) > 0: 
+            if 1: 
                 rho_guess = rho_guess * 1 / mysum(rho_guess)
-
-        #print(f'Adjusting {np.sum(rho_guess > 0)}', end=' ')
-
-        F_p = myfftn(rho+ref_rho, DENSS_GPU=DENSS_GPU)
-        F_g = myfftn(rho_guess, DENSS_GPU=DENSS_GPU)        
- 
-        #sometimes, when using denss.refine.py with non-random starting rho,
-        #the resulting Fs result in zeros in some locations and the algorithm to break
-        #here just make those values to be 1e-16 to be non-zero
-        #F_p[myabs(F_p, DENSS_GPU=DENSS_GPU)==0] = 0
-        #F_g[myabs(F_p, DENSS_GPU=DENSS_GPU)==0] = 0
-
-        #APPLY RECIPROCAL SPACE FITTING
-        #calculate spherical average of intensities from 3D Fs
-
-        I3D_p = myabs(F_p, DENSS_GPU=DENSS_GPU)**2  # Scattering intensity from prior (protein + ligand so far)
-        I3D_g = myabs(F_g, DENSS_GPU=DENSS_GPU)**2  # Scattering intensity from current guess dot
-        I3D_c = (F_p.conjugate() * F_g).real                    # Cross scattering intensity
-        Imean_p = mybinmean(I3D_p, qbin_labels, DENSS_GPU=DENSS_GPU)
-        Imean_g = mybinmean(I3D_g, qbin_labels, DENSS_GPU=DENSS_GPU)
-        Imean_c = mybinmean(I3D_c, qbin_labels, DENSS_GPU=DENSS_GPU)
-
-        chi[j] = mysum(((Imean_p[qba]-Idata)/sigqdata)**2, DENSS_GPU=DENSS_GPU)/Idata.size
-
-        # TODO: Post this function
-        factor = res_func_analytical(Idata, Imean_p[qba], Imean_c[qba], Imean_g[qba], sigqdata, DENSS_GPU=DENSS_GPU)
-        #print(f'{factor:2f}', end=' ')
-        rho_guess_mod = rho_guess * factor
-        rho_guess_mod[~lig_mask] = 0 
-        rho_guess_mod[~support] = 0 
-        rho_guess_test = rho_guess_mod + rho
-        rho_guess_test[rho_guess_test < 0] = 0 # TODO: Could be that this cannot be lower than the negative of prior density
-        #rho_guess_test = cp.maximum(rho_guess_test, -ref_rho) # TODO: Could be that this cannot be lower than the negative of prior density
-        #rho_guess_test = rho_guess_test / mysum(rho_guess_test, DENSS_GPU=DENSS_GPU) * lig_ne
-        F_a = myfftn(ref_rho + rho_guess_test, DENSS_GPU=DENSS_GPU)
-        I3D_a = myabs(F_a, DENSS_GPU=DENSS_GPU)**2
-        Imean_a = mybinmean(I3D_a, qbin_labels, DENSS_GPU=DENSS_GPU)
-
-        chi_int = np.sum(((Imean_a[qba]-Idata)/sigqdata)**2)/Idata.size
-
-        if j%200 == 0 and j > 0:
-            t1 = time.time() - t0
-            if t1 < j:
-                print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s', end='\n')
+    
+            while mysum(rho_guess[lig_mask*support], DENSS_GPU=DENSS_GPU) < 0.3:
+                lig_cen = cp.array([minx + (maxx-minx) * cp.random.random(),
+                                 miny + (maxy-miny) * cp.random.random(),
+                                 minz + (maxz-minz) * cp.random.random()]).T
+                rho_guess = dist2_from_cen(lig_cen, x, y, z) < (dot_radius_start - (dot_radius_start - dot_radius_end) * (min( j * dot_tuning / steps, 1)))**2 
+                #rho_guess = np.sqrt(2 * np.pi)**3 / sigma_trial**3 * np.exp(- dist2_from_cen(lig_cen, x, y, z) / 2 / sigma_trial**2)
+                #if mysum(rho_guess, DENSS_GPU=DENSS_GPU) > 0:  
+                if 1: # Because 0.9 A is always longer than voxel (1 A) * sqrt(3) / 2, the longest possible distance between a center and a voxel 
+                    rho_guess = rho_guess * 1 / mysum(rho_guess)
+    
+            #print(f'Adjusting {np.sum(rho_guess > 0)}', end=' ')
+    
+            F_p = myfftn(rho+ref_rho, DENSS_GPU=DENSS_GPU)
+            F_g = myfftn(rho_guess, DENSS_GPU=DENSS_GPU)        
+     
+            #sometimes, when using denss.refine.py with non-random starting rho,
+            #the resulting Fs result in zeros in some locations and the algorithm to break
+            #here just make those values to be 1e-16 to be non-zero
+            #F_p[myabs(F_p, DENSS_GPU=DENSS_GPU)==0] = 0
+            #F_g[myabs(F_p, DENSS_GPU=DENSS_GPU)==0] = 0
+    
+            #APPLY RECIPROCAL SPACE FITTING
+            #calculate spherical average of intensities from 3D Fs
+    
+            I3D_p = myabs(F_p, DENSS_GPU=DENSS_GPU)**2  # Scattering intensity from prior (protein + ligand so far)
+            I3D_g = myabs(F_g, DENSS_GPU=DENSS_GPU)**2  # Scattering intensity from current guess dot
+            I3D_c = (F_p.conjugate() * F_g).real                    # Cross scattering intensity
+            Imean_p = mybinmean(I3D_p, qbin_labels, DENSS_GPU=DENSS_GPU)
+            Imean_g = mybinmean(I3D_g, qbin_labels, DENSS_GPU=DENSS_GPU)
+            Imean_c = mybinmean(I3D_c, qbin_labels, DENSS_GPU=DENSS_GPU)
+    
+            chi[j] = mysum(((Imean_p[qba]-Idata)/sigqdata)**2, DENSS_GPU=DENSS_GPU)/Idata.size
+            
+            # TODO: Post this function
+            factor = res_func_analytical(Idata, Imean_p[qba], Imean_c[qba], Imean_g[qba], sigqdata, DENSS_GPU=DENSS_GPU)
+            #print(f'{factor:2f}', end=' ')
+            rho_guess_mod = rho_guess * factor
+            rho_guess_mod[~(lig_mask * support)] = 0 
+            #rho_guess_mod[~support] = 0 
+            rho_guess_test = rho_guess_mod + rho
+            rho_guess_test[rho_guess_test < 0] = 0 # TODO: Could be that this cannot be lower than the negative of prior density
+            #rho_guess_test = cp.maximum(rho_guess_test, -ref_rho) # TODO: Could be that this cannot be lower than the negative of prior density
+            #rho_guess_test = rho_guess_test / mysum(rho_guess_test, DENSS_GPU=DENSS_GPU) * lig_ne
+            F_a = myfftn(ref_rho + rho_guess_test, DENSS_GPU=DENSS_GPU)
+            I3D_a = myabs(F_a, DENSS_GPU=DENSS_GPU)**2
+            Imean_a = mybinmean(I3D_a, qbin_labels, DENSS_GPU=DENSS_GPU)
+    
+            chi_int = np.sum(((Imean_a[qba]-Idata)/sigqdata)**2)/Idata.size
+    
+            if j%timing_period == 0 and j > 0:
+                t1 = time.time() - t0
+                if t1 < j:
+                    print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s')#, chi improv = {(1 - chi[j] / chi[j-200])* 100:.1f} %', end='\n')
+                else:
+                    print(f'Timing: {t1:.2f} s, {t1/j:.2f} s / step', end='\n')
+            if j>refine_switch and j%pip_period == 0 and refine_mode == 'pip':
+                performance = 1 - chi[j] / chi[j-pip_period]
+                if performance < pip_threshold:
+                    change_next_n_steps_to_q = int(max(min(pip_period, pip_period * (1 - performance / pip_threshold)), 0))
+                    print(f'Performance is {performance*100:.1f} % over the last {pip_period} steps, changing next {change_next_n_steps_to_q} steps to reciprocal space refinement')
+                    if change_next_n_steps_to_q > 0:
+                        refine_schedule[(j+1):(j+change_next_n_steps_to_q+1)] = 'q'
+            
+            if chi_int > chi[j]:
+                #print('X', end='')
+                if j in enforce_connectivity_steps and enforce_connectivity:
+                    do_ec_next_step = True # Because this continue statement may accidentally skip enforce connectivity
+                if shrinkwrap and j >= shrinkwrap_minstep and j%shrinkwrap_iter==1:
+                    do_sw_next_step = True
+                continue
             else:
-                print(f'Timing: {t1:.2f} s, {t1/j:.2f} s / step', end='\n')
-        
-        if chi_int > chi[j]:
-            #print('X', end='')
-            if j in enforce_connectivity_steps and enforce_connectivity:
-                do_ec_next_step = True # Because this continue statement may accidentally skip enforce connectivity
-            if shrinkwrap and j >= shrinkwrap_minstep and j%shrinkwrap_iter==1:
-                do_sw_next_step = True
-            continue
-        else:
-            rho = rho_guess_test
+                rho = rho_guess_test
+            rhoprime = rho 
 
+        elif refine_schedule[j] == 'q':
+            F = myfftn(rho + ref_rho, DENSS_GPU=DENSS_GPU)
+            #F[myabs(F,DENSS_GPU=DENSS_GPU) == 0] = 1e-16
+            I3D = myabs(F, DENSS_GPU=DENSS_GPU)**2
+            Imean = mybinmean(I3D, qbin_labels, DENSS_GPU=DENSS_GPU)
+            factors = mysqrt(Idata/Imean[qba], DENSS_GPU=DENSS_GPU)
+            F *= factors[qbin_labels]
 
-        rhoprime = rho 
+            chi[j] = mysum(((Imean[qba]-Idata)/sigqdata)**2, DENSS_GPU=DENSS_GPU)/Idata.size
+            #APPLY REAL SPACE RESTRAINTS
+            rhoprime = myifftn(F, DENSS_GPU=DENSS_GPU)
+            rhoprime = rhoprime.real - ref_rho
+
+            newrho = myzeros(rho.shape, DENSS_GPU=DENSS_GPU)
+
+            #Error Reduction
+            newrho[support] = rhoprime[support]
+            newrho[~support] = 0.0
+            newrho[newrho < 0] = 0.0
+
+            if j%timing_period == 0 and j > 0:
+                t1 = time.time() - t0
+                if t1 < j:
+                    print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s')#, chi improv = {(1 - chi[j] / chi[j-200])* 100:.1f} %', end='\n')
+                else:
+                    print(f'Timing: {t1:.2f} s, {t1/j:.2f} s / step', end='\n')
+            if j>refine_switch and j%pip_period == 0 and refine_mode == 'pip':
+                performance = 1 - chi[j] / chi[j-pip_period]
+                if performance < pip_threshold:
+                    change_next_n_steps_to_q = int(max(min(pip_period, pip_period * (1 - performance / pip_threshold)), 0))
+                    print(f'Performance is {performance*100:.1f} % over the last {pip_period} steps, changing next {change_next_n_steps_to_q} steps to reciprocal space refinement')
+                    if change_next_n_steps_to_q > 0:
+                        refine_schedule[(j+1):(j+change_next_n_steps_to_q+1)] = 'q'
+            rho = newrho
+            rhoprime = rho
+
 
         if not DENSS_GPU and j%write_freq == 0:
             if write_xplor_format:

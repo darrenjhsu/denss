@@ -82,10 +82,10 @@ if __name__ == "__main__":
         extrapolate=args.extrapolate,
         output=args.output,
         steps=args.steps,
-        ncs=args.ncs,
-        ncs_steps=args.ncs_steps,
-        ncs_axis=args.ncs_axis,
-        ncs_type=args.ncs_type,
+        #ncs=args.ncs,
+        #ncs_steps=args.ncs_steps,
+        #ncs_axis=args.ncs_axis,
+        #ncs_type=args.ncs_type,
         seed=args.seed,
         shrinkwrap=args.shrinkwrap,
         shrinkwrap_old_method=args.shrinkwrap_old_method,
@@ -104,14 +104,15 @@ if __name__ == "__main__":
         quiet=args.quiet,
         DENSS_GPU=args.DENSS_GPU,
         my_logger=my_logger,
-        reg_scaling=args.reg_scaling,
-        reg_method=args.reg_method,
-        opt_method=args.opt_method,
-        include_lenx=args.include_lenx,
-        reg_coeff=args.reg_coeff,
-        num_patch=args.num_patch,
-        reg_kick_in=args.reg_kick_in,
-        reg_kick_freq=args.reg_kick_freq)
+        refine_mode=args.refine_mode,
+        refine_switch=args.refine_switch,
+        pip_threshold=args.pip_threshold,
+        pip_period=args.pip_threshold,
+        dot_radius_start=args.dot_radius_start,
+        dot_radius_end=args.dot_radius_end,
+        dot_tuning=args.dot_tuning,
+        timing_period=args.timing_period
+    )
 
     print("\n%s"%args.output)
 
