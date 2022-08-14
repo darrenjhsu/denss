@@ -2490,7 +2490,8 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     path='.', gui=False, DENSS_GPU=False,
     refine_mode='real', refine_switch=3000, pip_threshold=0.1, pip_period=200,
     dot_radius_start=1.8, dot_radius_end=0.9, dot_tuning=1.5,
-    timing_period=200
+    timing_period=200, write_EM_trace=False, write_EM_trace_freq=100,
+    empty_canvas=False
     ):
     """Calculate electron density from scattering data, using real space adjustments."""
     if abort_event is not None:
@@ -2681,17 +2682,24 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     if DENSS_GPU:
         cp.random.seed(seed)
 
-    if refine_mode == 'real' or refine_mode == 'pip':
+    if refine_mode == 'real':
         refine_schedule = np.array(['r'] * steps)
+        print(f'\n\nRefinement schedule is real space all the way\n\n')
+    elif refine_mode == 'pip':
+        refine_schedule = np.array(['r'] * steps)
+        print(f'\n\nRefinement schedule is real space up to {refine_switch} steps, then pip every {pip_period} steps with threshold {pip_threshold}\n\n')
     elif refine_mode == 'allq' or refine_mode == 'refine':
         refine_schedule = np.array(['q'] * steps)
+        print(f'\n\nRefinement schedule is q space all the way\n\n')
     else:
         raise ValueError("Refine mode must be 'real', 'pip', 'allq', or 'refine'")
-    if refine_mode == 'pip':
-        refine_schedule[:refine_switch] = 'q'
+    if refine_mode == 'switch':
+        refine_schedule[refine_switch:] = 'q'
+        print(f'\n\nRefinement schedule is real space up to {refine_switch}, then switch to q space\n\n')
 
     if refine_mode == 'refine' and rho_start is None:
         raise ValueError("Refine mode 'refine' must be paired with a rho_start")
+
 
     if rho_start is not None:
         rho = rho_start
@@ -2775,17 +2783,19 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     my_logger.info('Final trial density dot radius: %.2f', dot_radius_end)
     my_logger.info('Dot shrinking period (%.2f) ends at step %.0f', dot_tuning, (1 / dot_tuning) * steps)
     my_logger.info('Print timing period: %i', timing_period)
-
-    if not quiet:
-        if gui:
-            my_logger.info("\n Step     Chi2     Rg    Support Volume")
-            my_logger.info(" ----- --------- ------- --------------")
-        else:
-            print("\n Step     Chi2     Rg    Support Volume")
-            print(" ----- --------- ------- --------------")
-
-    np.set_printoptions(formatter={'float': lambda x: format(x, '.3E')})
+    my_logger.info('Write EM trace: %s', write_EM_trace)
+    my_logger.info('Write EM trace frequency: %i steps', write_EM_trace_freq)
+    my_logger.info('Start with empty canvas: %s', empty_canvas)
     
+    # Process initial guess
+    rho = rho * lig_mask # First zero density outside of box
+    #eroded = ndimage.binary_erosion(lig_mask)
+    #print(f'Eroded 1 outer pixel from lig_mask ({np.sum(lig_mask)}) to ({np.sum(eroded)})')
+    #rho[~eroded] = 0
+    rho = rho / mysum(rho, DENSS_GPU=DENSS_GPU) * lig_ne 
+    if empty_canvas:
+        print("\nStarting with empty search space\n\n")
+        rho *= 0     
 
     if DENSS_GPU:
         print('Transferring numpy arrays to cupy arrays ...', end=' ')
@@ -2805,12 +2815,18 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
         x = cp.array(x)
         y = cp.array(y)
         z = cp.array(z)
-        print(f'Done')
+        print(f'Done\n\n')
 
+    if not quiet:
+        if gui:
+            my_logger.info("\n Step     Chi2     Rg    Support Volume")
+            my_logger.info(" ----- --------- ------- --------------")
+        else:
+            print("\n Step     Chi2     Rg    Support Volume")
+            print(" ----- --------- ------- --------------")
 
-    # Process initial guess
-    rho = rho * lig_mask # First zero density outside of box
-    rho = rho / mysum(rho, DENSS_GPU=DENSS_GPU) * lig_ne 
+    np.set_printoptions(formatter={'float': lambda x: format(x, '.3E')})
+
 
 
     t0 = time.time()
@@ -2885,7 +2901,7 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
             if j%timing_period == 0 and j > 0:
                 t1 = time.time() - t0
                 if t1 < j:
-                    print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s')#, chi improv = {(1 - chi[j] / chi[j-200])* 100:.1f} %', end='\n')
+                    print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s, chi2 improv = {(1 - chi[j] / chi[j-200])* 100:.1f} %', end='\n')
                 else:
                     print(f'Timing: {t1:.2f} s, {t1/j:.2f} s / step', end='\n')
             if j>refine_switch and j%pip_period == 0 and refine_mode == 'pip':
@@ -2895,6 +2911,10 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
                     print(f'Performance is {performance*100:.1f} % over the last {pip_period} steps, changing next {change_next_n_steps_to_q} steps to reciprocal space refinement')
                     if change_next_n_steps_to_q > 0:
                         refine_schedule[(j+1):(j+change_next_n_steps_to_q+1)] = 'q'
+                else:
+                    print(f'Performance is {performance*100:.1f} % over the last {pip_period} steps')
+            if j == refine_switch and refine_mode == 'pip':
+                print('Starting performance evaluation ...')
             
             if chi_int > chi[j]:
                 #print('X', end='')
@@ -2902,7 +2922,7 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
                     do_ec_next_step = True # Because this continue statement may accidentally skip enforce connectivity
                 if shrinkwrap and j >= shrinkwrap_minstep and j%shrinkwrap_iter==1:
                     do_sw_next_step = True
-                continue
+                #continue
             else:
                 rho = rho_guess_test
             rhoprime = rho 
@@ -2930,7 +2950,7 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
             if j%timing_period == 0 and j > 0:
                 t1 = time.time() - t0
                 if t1 < j:
-                    print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s')#, chi improv = {(1 - chi[j] / chi[j-200])* 100:.1f} %', end='\n')
+                    print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s, chi improv = {(1 - chi[j] / chi[j-200])* 100:.1f} %', end='\n')
                 else:
                     print(f'Timing: {t1:.2f} s, {t1/j:.2f} s / step', end='\n')
             if j>refine_switch and j%pip_period == 0 and refine_mode == 'pip':
@@ -2940,6 +2960,10 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
                     print(f'Performance is {performance*100:.1f} % over the last {pip_period} steps, changing next {change_next_n_steps_to_q} steps to reciprocal space refinement')
                     if change_next_n_steps_to_q > 0:
                         refine_schedule[(j+1):(j+change_next_n_steps_to_q+1)] = 'q'
+                else:
+                    print(f'Performance is {performance*100:.1f} % over the last {pip_period} steps')
+            if j == refine_switch and refine_mode == 'pip':
+                print('Starting performance evaluation ...')
             rho = newrho
             rhoprime = rho
 
@@ -2948,6 +2972,14 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
             if write_xplor_format:
                 write_xplor(rhoprime/dV, side, fprefix+"_current.xplor")
             write_mrc(rhoprime/dV, side, fprefix+"_current.mrc")
+
+        if write_EM_trace and j%write_EM_trace_freq == 0:
+            if DENSS_GPU:
+                rhoprime_out = cp.asnumpy(rhoprime)
+            if write_xplor_format:
+                write_xplor(rhoprime_out/dV, side, fprefix+f"_step{j}.xplor")
+            write_mrc(rhoprime_out/dV, side, fprefix+f"_step{j}.mrc")
+                
 
         if DENSS_GPU:
             #havent yet updated rho2rg to work with cupy

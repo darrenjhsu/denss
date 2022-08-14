@@ -107,11 +107,15 @@ if __name__ == "__main__":
         refine_mode=args.refine_mode,
         refine_switch=args.refine_switch,
         pip_threshold=args.pip_threshold,
-        pip_period=args.pip_threshold,
+        pip_period=args.pip_period,
         dot_radius_start=args.dot_radius_start,
         dot_radius_end=args.dot_radius_end,
         dot_tuning=args.dot_tuning,
-        timing_period=args.timing_period
+        timing_period=args.timing_period,
+        rho_start=args.rho_start,
+        write_EM_trace=args.write_EM_trace,
+        write_EM_trace_freq=args.write_EM_trace_freq,
+        empty_canvas=args.empty_canvas
     )
 
     print("\n%s"%args.output)
@@ -141,13 +145,16 @@ if __name__ == "__main__":
         ax0.errorbar(qraw, Iraw, fmt='k.', yerr=sigq2, mec='none', mew=0, ms=3, alpha=0.3, capsize=0, elinewidth=0.1, ecolor=cc.to_rgba('0',alpha=0.5),label='Supplied Data')
         ax0.plot(q, I, 'k--',alpha=0.7,lw=1,label='Supplied Fit')
         ax0.plot(qdata[qdata<=q[-1]], Idata[qdata<=q[-1]], 'bo',alpha=0.5,label='Interpolated')
-        ax0.plot(qbinsc[qdata<=q[-1]],Imean[qdata<=q[-1]],'r.',label='DENSS Map')
+        #ax0.plot(qbinsc[qdata<=q[-1]],Imean[qdata<=q[-1]],'r.',label='DENSS Map')
+        ax0.plot(qbinsc, Imean,'r.',label='DENSS Map')
         handles,labels = ax0.get_legend_handles_labels()
         handles = [handles[3], handles[0], handles[1],handles[2]]
         labels = [labels[3], labels[0], labels[1], labels[2]]
         xmax = np.min([qraw.max(),q.max(),qdata.max()])*1.1
-        ymin = np.min([np.min(I[q<=xmax]),np.min(Idata[qdata<=xmax]),np.min(Imean[qdata<=xmax])])
-        ymax = np.max([np.max(I[q<=xmax]),np.max(Idata[qdata<=xmax]),np.max(Imean[qdata<=xmax])])
+        #ymin = np.min([np.min(I[q<=xmax]),np.min(Idata[qdata<=xmax]),np.min(Imean[qdata<=xmax])])
+        #ymax = np.max([np.max(I[q<=xmax]),np.max(Idata[qdata<=xmax]),np.max(Imean[qdata<=xmax])])
+        ymin = np.min([np.min(I[q<=xmax]),np.min(Idata[qdata<=xmax]),np.min(Imean)])
+        ymax = np.max([np.max(I[q<=xmax]),np.max(Idata[qdata<=xmax]),np.max(Imean)])
         ax0.set_xlim([-xmax*.05,xmax])
         ax0.set_ylim([0.5*ymin,1.5*ymax])
         ax0.legend(handles,labels)

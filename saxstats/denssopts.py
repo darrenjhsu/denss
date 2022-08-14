@@ -100,9 +100,9 @@ def parse_arguments(parser):
     parser.add_argument("--ligand_mask_mode", default='cubic', type=str, help="Mask shape (cubic or sphere)")
     parser.add_argument("--ligand_template", default=None, type=str, help="Reference mask file name (maybe from a known ligand)")
 
-    parser.add_argument("--refine_mode", default='real', type=str, help='''[real / pip / switch / allq / refine]. 
+    parser.add_argument("--refine_mode", default='pip', type=str, help='''[real / pip / switch / allq / refine]. 
 real = use real space refinement all the way.
-pip (performance improvement plan) = improve chi^2 fitting by assigning some steps to error reduction, must provide pip_threshold, pip_period, and refine_switch.
+pip (performance improvement plan, default) = improve chi^2 fitting by assigning some steps to error reduction, must provide pip_threshold, pip_period, and refine_switch.
 switch = switch to error reduction at a specific step, must provide refine_switch.
 allq = use error reduction all the way.
 refine = use error reduction but starting with an averaged map, must provide rho_start.
@@ -114,6 +114,11 @@ refine = use error reduction but starting with an averaged map, must provide rho
     parser.add_argument("--dot_radius_end", default=0.9, type=float, help='Final real space electron density dot size in Angstroms. If this is too small (< sqrt(3) / 2 of voxel size) then the program may be slower due to multiple retries to create a trial density')
     parser.add_argument("--dot_tuning", default=1.5, type=float, help='Speed of dot radius shrinkage. It is the dot will quadratically shrink to final radius at step (1 / dot_tuning) * steps, so higher value means more aggresive shrinking.')
     parser.add_argument("--timing_period", default=200, type=int, help='Print timing every this step')
+    parser.add_argument("--write_EM_trace", dest="write_EM_trace", action="store_true", help='Whether to write EM traces (will be very slow)')
+    parser.set_defaults(write_EM_trace=False)
+    parser.add_argument("--write_EM_trace_freq", default=100, type=int, help='How frequent to write EM traces in steps')
+    parser.add_argument("--empty_canvas", dest="empty_canvas", action="store_true", help='Start with empty search space')
+    parser.set_defaults(write_EM_trace=False)
     args = parser.parse_args()
 
     if args.plot:
@@ -348,6 +353,16 @@ refine = use error reduction but starting with an averaged map, must provide rho
         print(f'Currently Dmax is {dmax}, but we are going to overwrite it to {side / args.oversampling}') 
         print(f'Voxel is then {voxel}')
         args.ref = rho
+
+    if args.rho_start is not None:
+        rho, side = saxs.read_mrc(args.rho_start)
+        dmax = side / args.oversampling
+        nsamples = rho.shape[0]
+        voxel = dmax * args.oversampling / nsamples
+        print(f'This read rho_start file has a side of {side} and nsamples={rho.shape[0]}')
+        print(f'Currently Dmax is {dmax}, but we are going to overwrite it to {side / args.oversampling}') 
+        print(f'Voxel is then {voxel}')
+        args.rho_start = rho
 
     if args.ligand_template is not None: # ligand_ref is a rho map, must have the same shape as ref_rho
         rho, _ = saxs.read_mrc(args.ligand_template)
