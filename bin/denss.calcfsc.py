@@ -76,9 +76,9 @@ if __name__ == "__main__":
     fsc = saxs.calc_fsc(rho,refrho,side)
     resn, x, y, resx = saxs.fsc2res(fsc, return_plot=True)
     if np.min(fsc[:,1]) > 0.5:
-        print("Resolution: < %.1f A (maximum possible)" % resn)
+        print("Resolution: < %.3f A (maximum possible)" % resn)
     else:
-        print("Resolution: %.1f A" % resn)
+        print("Resolution: %.3f A" % resn)
 
     np.savetxt(output+'.dat', fsc, delimiter=' ', fmt='% .5e', header="1/resolution, FSC; Resolution=%.1f A" % resn)
 

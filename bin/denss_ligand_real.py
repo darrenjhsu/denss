@@ -72,6 +72,7 @@ if __name__ == "__main__":
         ligand_box_size=args.ligand_box_size,
         ligand_mask_mode=args.ligand_mask_mode,
         ligand_ref=args.ligand_ref,
+        no_overlap=args.no_overlap,
         ne=args.ne,
         voxel=args.voxel,
         oversampling=args.oversampling,

@@ -97,8 +97,10 @@ def parse_arguments(parser):
     parser.add_argument("-ref", "--ref", default=None, type=str, help="Reference .mrc file for denss_ligand_real")
     parser.add_argument("--ligand_center", default=None, nargs=3, type=float, help="Center of ligand search box")
     parser.add_argument("--ligand_box_size", default=40, type=float, help="Side length of the search box for ligand density, in Angstrom")
-    parser.add_argument("--ligand_mask_mode", default='cubic', type=str, help="Mask shape (cubic or sphere)")
+    parser.add_argument("--ligand_mask_mode", default='cubic', type=str, help="Mask shape (cubic, sphere, template = dilate a guess pdb, or precalc = use exact mrc)")
     parser.add_argument("--ligand_template", default=None, type=str, help="Reference mask file name (maybe from a known ligand)")
+    parser.add_argument("--no_overlap", dest="no_overlap", action="store_true", help="Remove voxels of search space that overlap with reference rho")
+    parser.set_defaults(no_overlap=False)
 
     parser.add_argument("--refine_mode", default='pip', type=str, help='''[real / pip / switch / allq / refine]. 
 real = use real space refinement all the way.
@@ -117,7 +119,7 @@ refine = use error reduction but starting with an averaged map, must provide rho
     parser.add_argument("--write_EM_trace", dest="write_EM_trace", action="store_true", help='Whether to write EM traces (will be very slow)')
     parser.set_defaults(write_EM_trace=False)
     parser.add_argument("--write_EM_trace_freq", default=100, type=int, help='How frequent to write EM traces in steps')
-    parser.add_argument("--empty_canvas", dest="empty_canvas", action="store_true", help='Start with empty search space')
+    parser.add_argument("--empty_canvas", dest="empty_canvas", action="store_true", help='start with empty search space')
     parser.set_defaults(write_EM_trace=False)
     args = parser.parse_args()
 
@@ -365,9 +367,12 @@ refine = use error reduction but starting with an averaged map, must provide rho
         args.rho_start = rho
 
     if args.ligand_template is not None: # ligand_ref is a rho map, must have the same shape as ref_rho
-        rho, _ = saxs.read_mrc(args.ligand_template)
-        args.ligand_mask_mode = 'template'
-        args.ligand_ref = rho > 0
+        #assert args.ligand_mask_mode == 'template' or args.ligand_mask_mode == 'precalc', "When you provide a template, ligand_mask_mode must be set to template or precalc"
+        if args.ligand_mask_mode == 'template':
+            rho, _ = saxs.read_mrc(args.ligand_template)
+            args.ligand_ref = rho > 0
+        elif args.ligand_mask_mode == 'UB' or args.ligand_mask_mode == 'UB_erode':
+            args.ligand_ref = args.ligand_template # Directly pass the file name 
     else:
         args.ligand_ref = None
 

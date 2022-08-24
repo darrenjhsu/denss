@@ -2476,7 +2476,7 @@ def dist2_from_cen(center, meshx, meshy, meshz):
     return (meshx - center[0])**2 + (meshy - center[1])**2 + (meshz - center[2])**2
 
 def denss_ligand_real(q, I, sigq, dmax, ref_rho, 
-    ligand_center, ligand_box_size=40, ligand_mask_mode='cubic', ligand_ref=None,
+    ligand_center, ligand_box_size=40, ligand_mask_mode='cubic', ligand_ref=None, no_overlap=False, 
     ne=None, voxel=5., oversampling=3., recenter=True, recenter_steps=None,
     recenter_mode="com", positivity=True, extrapolate=False, output="map",
     steps=None, seed=None, flatten_low_density=True, rho_start=None, add_noise=None,
@@ -2538,33 +2538,49 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     r = np.sqrt(x**2 + y**2 + z**2)
 
 
-
     # Mask for ligand search
     cx, cy, cz = ligand_center
-    print(f'Ligand center is at {ligand_center}')
     if ligand_mask_mode == 'sphere':
+        print(f'Ligand center is at {ligand_center}')
         lig_r = np.sqrt((x-cx)**2 + (y-cy)**2 + (z-cz)**2)
         lig_mask = lig_r < ligand_box_size
     elif ligand_mask_mode == 'cubic':
+        print(f'Ligand center is at {ligand_center}')
         lig_mask = (np.abs(x-cx) < ligand_box_size) * (np.abs(y-cy) < ligand_box_size) * (np.abs(z-cz) < ligand_box_size)
     elif ligand_mask_mode == 'template':
+        print(f'In ligand_mask_mode template, there are {np.sum(ligand_ref > 0)} voxels > 0')
         kernel = ndimage.generate_binary_structure(3, 2)
         lig_mask = ndimage.binary_dilation(ligand_ref, structure=kernel)
+    elif ligand_mask_mode == 'precalc':
+        print(f'In ligand_mask_mode precalc, there are {np.sum(ligand_ref > 0)} voxels > 0')
+        lig_mask = ligand_ref > 0 
+    elif ligand_mask_mode == 'UB' or ligand_mask_mode == 'UB_erode': # In this case the ligand_ref is a pdb name
+        pdb_search = PDB(ligand_ref)
+        resolution = 1.0
+        dl = 2 * resolution
+        idx_search = pdb2support_fast(pdb_search,x,y,z,dr=dl)
+        while np.sum(idx_search * dV) < 1600:
+            print(f'Dilating idx_search to reach 1600 A^3, currently {np.sum(idx_search * dV):.1f} A^3')
+            idx_search = ndimage.binary_dilation(idx_search, iterations=1)
+        ligand_ref = idx_search #ndimage.binary_dilation(idx_search,iterations=3)
+        print(f'In ligand_mask_mode UB, there are {np.sum(ligand_ref > 0)} voxels > 0')
+        lig_mask = ligand_ref > 0 
     else:
         raise ValueError
 
     lig_mask_xyz = np.array([x.flatten(), y.flatten(), z.flatten()]).T[lig_mask.flatten()]
     print(lig_mask_xyz.shape)
 
-    no_overlap_with_ref_rho = 1
+    no_overlap_with_ref_rho = no_overlap 
 
     # TODO Maybe further filter by ref_rho - no overlap is allowed
     if no_overlap_with_ref_rho:
+        print('Removing voxels overlaping with reference rho ...', end=' ')
+        init_lig_mask = np.sum(lig_mask)
         lig_mask *= (ref_rho < 0.2) # Remove any overlap
         struct = ndimage.generate_binary_structure(3, 3)
         labeled_chunk, num_features = ndimage.label(lig_mask, structure=struct)
         sums = np.zeros((num_features))
-        print(num_features)
     
         #find the feature with the greatest number of electrons
         for feature in range(num_features+1):
@@ -2573,6 +2589,8 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     
         #remove features from the support that are not the primary feature
         lig_mask[labeled_chunk != big_feature] = 0
+        end_lig_mask = np.sum(lig_mask)
+        print(f'removed {init_lig_mask - end_lig_mask} voxels out of {init_lig_mask}')
 
     if ligand_mask_mode == 'sphere':
         print(f'In sphere mask mode, we have {np.sum(lig_mask)} voxels out of {n**3} voxels for active search')
@@ -2593,7 +2611,7 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     maxy = np.max(y[lig_mask])
     minz = np.min(z[lig_mask])
     maxz = np.max(z[lig_mask])
-    #print(f'Mask dimensions: {minx}, {maxx}, {miny}, {maxy}, {minz}, {maxz}')
+    print(f'Mask dimensions: {minx}, {maxx}, {miny}, {maxy}, {minz}, {maxz}')
 
 
 
@@ -2691,9 +2709,12 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     elif refine_mode == 'allq' or refine_mode == 'refine':
         refine_schedule = np.array(['q'] * steps)
         print(f'\n\nRefinement schedule is q space all the way\n\n')
+    elif refine_mode == 'switch':
+        pass
     else:
         raise ValueError("Refine mode must be 'real', 'pip', 'allq', or 'refine'")
     if refine_mode == 'switch':
+        refine_schedule = np.array(['r'] * steps)
         refine_schedule[refine_switch:] = 'q'
         print(f'\n\nRefinement schedule is real space up to {refine_switch}, then switch to q space\n\n')
 
@@ -2788,11 +2809,17 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     my_logger.info('Start with empty canvas: %s', empty_canvas)
     
     # Process initial guess
+    if ligand_mask_mode == 'UB_erode':
+        print("Eroding initial guess by 1 voxel ...")
+        eroded = ndimage.binary_erosion(lig_mask, iterations=1)
+        rho = rho * eroded
+        print(f'Eroded 1 outer pixel from lig_mask ({np.sum(lig_mask)}) to ({np.sum(eroded)})')
+
     rho = rho * lig_mask # First zero density outside of box
     #eroded = ndimage.binary_erosion(lig_mask)
-    #print(f'Eroded 1 outer pixel from lig_mask ({np.sum(lig_mask)}) to ({np.sum(eroded)})')
     #rho[~eroded] = 0
-    rho = rho / mysum(rho, DENSS_GPU=DENSS_GPU) * lig_ne 
+    rho = rho / mysum(rho, DENSS_GPU=DENSS_GPU) * lig_ne
+ 
     if empty_canvas:
         print("\nStarting with empty search space\n\n")
         rho *= 0     
@@ -2846,8 +2873,13 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
             rho_guess = dist2_from_cen(lig_cen, x, y, z) < (dot_radius_start - (dot_radius_start - dot_radius_end) * (min( j * dot_tuning / steps, 1)))**2 
             #rho_guess = np.sqrt(2 * np.pi)**3 / sigma_trial**3 * np.exp(- dist2_from_cen(lig_cen, x, y, z) / 2 / sigma_trial**2)
             #if mysum(rho_guess, DENSS_GPU=DENSS_GPU) > 0: 
-            if 1: 
-                rho_guess = rho_guess * 1 / mysum(rho_guess)
+            if dot_radius_end < np.sqrt(3) / 2 * dx:
+                if mysum(rho_guess, DENSS_GPU=DENSS_GPU) > 0:
+                # Because dx * sqrt(3) / 2 is the longest possible distance between a center and a voxel,
+                # if dot_radius_end is larger than that we don't need to check this. Same below
+                    rho_guess = rho_guess * 1 / mysum(rho_guess, DENSS_GPU=DENSS_GPU)
+            else:
+                rho_guess = rho_guess * 1 / mysum(rho_guess, DENSS_GPU=DENSS_GPU)
     
             while mysum(rho_guess[lig_mask*support], DENSS_GPU=DENSS_GPU) < 0.3:
                 lig_cen = cp.array([minx + (maxx-minx) * cp.random.random(),
@@ -2856,8 +2888,12 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
                 rho_guess = dist2_from_cen(lig_cen, x, y, z) < (dot_radius_start - (dot_radius_start - dot_radius_end) * (min( j * dot_tuning / steps, 1)))**2 
                 #rho_guess = np.sqrt(2 * np.pi)**3 / sigma_trial**3 * np.exp(- dist2_from_cen(lig_cen, x, y, z) / 2 / sigma_trial**2)
                 #if mysum(rho_guess, DENSS_GPU=DENSS_GPU) > 0:  
-                if 1: # Because 0.9 A is always longer than voxel (1 A) * sqrt(3) / 2, the longest possible distance between a center and a voxel 
-                    rho_guess = rho_guess * 1 / mysum(rho_guess)
+                if dot_radius_end < np.sqrt(3) / 2 * dx:
+                    if mysum(rho_guess, DENSS_GPU=DENSS_GPU) > 0:
+                        rho_guess = rho_guess * 1 / mysum(rho_guess, DENSS_GPU=DENSS_GPU)
+                else:
+                    rho_guess = rho_guess * 1 / mysum(rho_guess, DENSS_GPU=DENSS_GPU)
+                    
     
             #print(f'Adjusting {np.sum(rho_guess > 0)}', end=' ')
     
@@ -2901,7 +2937,7 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
             if j%timing_period == 0 and j > 0:
                 t1 = time.time() - t0
                 if t1 < j:
-                    print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s, chi2 improv = {(1 - chi[j] / chi[j-200])* 100:.1f} %', end='\n')
+                    print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s, chi2 improv = {(1 - chi[j] / chi[j-timing_period])* 100:.1f} %', end='\n')
                 else:
                     print(f'Timing: {t1:.2f} s, {t1/j:.2f} s / step', end='\n')
             if j>refine_switch and j%pip_period == 0 and refine_mode == 'pip':
@@ -2946,11 +2982,12 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
             newrho[support] = rhoprime[support]
             newrho[~support] = 0.0
             newrho[newrho < 0] = 0.0
+            newrho[~lig_mask] = 0.0
 
             if j%timing_period == 0 and j > 0:
                 t1 = time.time() - t0
                 if t1 < j:
-                    print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s, chi improv = {(1 - chi[j] / chi[j-200])* 100:.1f} %', end='\n')
+                    print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s, chi2 improv = {(1 - chi[j] / chi[j-timing_period])* 100:.1f} %', end='\n')
                 else:
                     print(f'Timing: {t1:.2f} s, {t1/j:.2f} s / step', end='\n')
             if j>refine_switch and j%pip_period == 0 and refine_mode == 'pip':
@@ -4554,6 +4591,12 @@ def pdb2map_multigauss(pdb,x,y,z,cutoff=3.0,resolution=0.0,ignore_waters=True):
     #convert resolution to B-factor for form factor calculation
     #set resolution equal to atomic displacement
     B = u2B(resolution)
+    gxmin = x.min()
+    gxmax = x.max()
+    gymin = y.min()
+    gymax = y.max()
+    gzmin = z.min()
+    gzmax = z.max()
     for i in range(pdb.coords.shape[0]):
         if ignore_waters and pdb.resname[i]=="HOH":
             continue
@@ -4565,12 +4608,12 @@ def pdb2map_multigauss(pdb,x,y,z,cutoff=3.0,resolution=0.0,ignore_waters=True):
         xa, ya, za = pdb.coords[i] # for convenience, store up x,y,z coordinates of atom
         #ignore atoms whose coordinates are outside the box limits
         if (
-            (xa < x.min()) or
-            (xa > x.max()) or
-            (ya < y.min()) or
-            (ya > y.max()) or
-            (za < z.min()) or
-            (za > z.max())
+            (xa < gxmin) or
+            (xa > gxmax) or
+            (ya < gymin) or
+            (ya > gymax) or
+            (za < gzmin) or
+            (za > gzmax)
            ):
            print()
            print("Atom %d outside boundary of cell ignored."%i)
