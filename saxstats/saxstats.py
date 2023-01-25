@@ -2476,7 +2476,8 @@ def dist2_from_cen(center, meshx, meshy, meshz):
     return (meshx - center[0])**2 + (meshy - center[1])**2 + (meshz - center[2])**2
 
 def denss_ligand_real(q, I, sigq, dmax, ref_rho, 
-    ligand_center, ligand_box_size=40, ligand_mask_mode='cubic', ligand_ref=None, no_overlap=False, 
+    ligand_center=None, ligand_box_size=40, ligand_mask_mode='cubic', ligand_box_volume=0,
+    ligand_ref=None, no_overlap=False,
     ne=None, voxel=5., oversampling=3., recenter=True, recenter_steps=None,
     recenter_mode="com", positivity=True, extrapolate=False, output="map",
     steps=None, seed=None, flatten_low_density=True, rho_start=None, add_noise=None,
@@ -2490,6 +2491,7 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     path='.', gui=False, DENSS_GPU=False,
     refine_mode='real', refine_switch=3000, pip_threshold=0.1, pip_period=200,
     dot_radius_start=1.8, dot_radius_end=0.9, dot_tuning=1.5,
+    alternate_ER_HIO=False, alternate_period=100,
     timing_period=200, write_EM_trace=False, write_EM_trace_freq=100,
     empty_canvas=False
     ):
@@ -2539,12 +2541,17 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
 
 
     # Mask for ligand search
-    cx, cy, cz = ligand_center
+    if ligand_center is not None:
+        cx, cy, cz = ligand_center
     if ligand_mask_mode == 'sphere':
+        if ligand_center is None:
+            raise ValueError("Must provide ligand center")
         print(f'Ligand center is at {ligand_center}')
         lig_r = np.sqrt((x-cx)**2 + (y-cy)**2 + (z-cz)**2)
         lig_mask = lig_r < ligand_box_size
     elif ligand_mask_mode == 'cubic':
+        if ligand_center is None:
+            raise ValueError("Must provide ligand center")
         print(f'Ligand center is at {ligand_center}')
         lig_mask = (np.abs(x-cx) < ligand_box_size) * (np.abs(y-cy) < ligand_box_size) * (np.abs(z-cz) < ligand_box_size)
     elif ligand_mask_mode == 'template':
@@ -2554,14 +2561,56 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
     elif ligand_mask_mode == 'precalc':
         print(f'In ligand_mask_mode precalc, there are {np.sum(ligand_ref > 0)} voxels > 0')
         lig_mask = ligand_ref > 0 
+    elif ligand_mask_mode == 'bbox': # Bounding box, ligand_ref is a pdb name
+        print(f'In ligand_mask_mode bbox (bounding box)')
+        pdb_search = PDB(ligand_ref)
+        bxmin = pdb_search.coords[:,0].min()
+        bxmax = pdb_search.coords[:,0].max()
+        bymin = pdb_search.coords[:,1].min()
+        bymax = pdb_search.coords[:,1].max()
+        bzmin = pdb_search.coords[:,2].min()
+        bzmax = pdb_search.coords[:,2].max()
+        idx_search = (x > bxmin) * (x < bxmax) * (y > bymin) * (y < bymax) * (z > bzmin) * (z < bzmax)
+        if ligand_box_volume > 0:
+            while np.sum(idx_search * dV) < ligand_box_volume:
+                print(f'Dilating idx_search to reach {ligand_box_volume:.0f} A^3, currently {np.sum(idx_search * dV):.1f} A^3')
+                idx_search = ndimage.binary_dilation(idx_search, iterations=1)
+        else:
+            print(f'ligand_box_volume not supplied, default to dilation of 3 voxels ...')
+            idx_search = ndimage.binary_dilation(idx_search, iterations=3)
+        ligand_ref = idx_search #ndimage.binary_dilation(idx_search,iterations=3)
+        print(f'In ligand_mask_mode UB, there are {np.sum(ligand_ref > 0)} voxels > 0')
+        lig_mask = ligand_ref > 0 
+    elif ligand_mask_mode == 'bsphere': # Bounding sphere
+        pdb_search = PDB(ligand_ref)
+        lig_center = np.mean(pdb_search.coords, axis=0)
+        cx, cy, cz = lig_center
+        sphere_radius = np.max(np.linalg.norm(pdb_search.coords - lig_center, axis=1))
+        print(f'In ligand_mask_mode bsphere (bounding sphere) - the radius is {sphere_radius:.3f} A')
+        lig_r = np.sqrt((x-cx)**2 + (y-cy)**2 + (z-cz)**2)
+        idx_search = lig_r < sphere_radius
+        if ligand_box_volume > 0:
+            while np.sum(idx_search * dV) < ligand_box_volume:
+                print(f'Dilating idx_search to reach {ligand_box_volume:.0f} A^3, currently {np.sum(idx_search * dV):.1f} A^3')
+                idx_search = ndimage.binary_dilation(idx_search, iterations=1)
+        else:
+            print(f'ligand_box_volume not supplied, default to dilation of 3 voxels ...')
+            idx_search = ndimage.binary_dilation(idx_search, iterations=3)
+        ligand_ref = idx_search #ndimage.binary_dilation(idx_search,iterations=3)
+        print(f'In ligand_mask_mode UB, there are {np.sum(ligand_ref > 0)} voxels > 0')
+        lig_mask = ligand_ref > 0 
     elif ligand_mask_mode == 'UB' or ligand_mask_mode == 'UB_erode': # In this case the ligand_ref is a pdb name
         pdb_search = PDB(ligand_ref)
         resolution = 1.0
         dl = 2 * resolution
         idx_search = pdb2support_fast(pdb_search,x,y,z,dr=dl)
-        while np.sum(idx_search * dV) < 1600:
-            print(f'Dilating idx_search to reach 1600 A^3, currently {np.sum(idx_search * dV):.1f} A^3')
-            idx_search = ndimage.binary_dilation(idx_search, iterations=1)
+        if ligand_box_volume > 0:
+            while np.sum(idx_search * dV) < ligand_box_volume:
+                print(f'Dilating idx_search to reach {ligand_box_volume:.0f} A^3, currently {np.sum(idx_search * dV):.1f} A^3')
+                idx_search = ndimage.binary_dilation(idx_search, iterations=1)
+        else:
+            print(f'ligand_box_volume not supplied, default to dilation of 3 voxels ...')
+            idx_search = ndimage.binary_dilation(idx_search, iterations=3)
         ligand_ref = idx_search #ndimage.binary_dilation(idx_search,iterations=3)
         print(f'In ligand_mask_mode UB, there are {np.sum(ligand_ref > 0)} voxels > 0')
         lig_mask = ligand_ref > 0 
@@ -2701,26 +2750,57 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
         cp.random.seed(seed)
 
     if refine_mode == 'real':
-        refine_schedule = np.array(['r'] * steps)
+        refine_schedule = np.array(['re'] * steps)
         print(f'\n\nRefinement schedule is real space all the way\n\n')
     elif refine_mode == 'pip':
-        refine_schedule = np.array(['r'] * steps)
+        refine_schedule = np.array(['re'] * steps)
         print(f'\n\nRefinement schedule is real space up to {refine_switch} steps, then pip every {pip_period} steps with threshold {pip_threshold}\n\n')
-    elif refine_mode == 'allq' or refine_mode == 'refine':
-        refine_schedule = np.array(['q'] * steps)
+    elif refine_mode == 'er' or refine_mode == 'refine':
+        refine_schedule = np.array(['er'] * steps)
+        refine_switch = 0 # So if alternate_ER_HIO is set they'll be done from the beginning
         print(f'\n\nRefinement schedule is q space all the way\n\n')
+    elif refine_mode == 'hio':
+        refine_schedule = np.array(['hi'] * steps)
     elif refine_mode == 'switch':
         pass
     else:
-        raise ValueError("Refine mode must be 'real', 'pip', 'allq', or 'refine'")
+        raise ValueError("Refine mode must be 'real', 'pip', 'er', 'hio', 'switch' or 'refine'")
     if refine_mode == 'switch':
-        refine_schedule = np.array(['r'] * steps)
-        refine_schedule[refine_switch:] = 'q'
+        refine_schedule = np.array(['re'] * steps)
+        refine_schedule[refine_switch:] = np.array(['er'] * len(refine_schedule[refine_switch:]))
         print(f'\n\nRefinement schedule is real space up to {refine_switch}, then switch to q space\n\n')
 
     if refine_mode == 'refine' and rho_start is None:
         raise ValueError("Refine mode 'refine' must be paired with a rho_start")
 
+    if alternate_ER_HIO:
+        if refine_mode == 'real':
+            print('Since refinement is in real space, setting alternate_ER_HIO does not make sense. Ignoring the latter ...')
+        else:
+            # Run a single pass to change some ER to HIO
+            alternate_counter = 0
+            for i in range(refine_switch, steps, alternate_period):
+                if alternate_counter % 2 == 1:
+                    refine_schedule[i:i+alternate_period] = 'hi'
+                    #print(f'Assigned steps {i} to {i+alternate_period} to HIO')
+                alternate_counter += 1
+            refine_schedule[-alternate_period:] = 'er' # Set the final period to er
+
+
+    # Summarize the plan
+    if 0:
+        typethis = ''
+        typestart = 0
+        for i in range(steps):
+            if i == 0:
+                typethis = refine_schedule[i]
+            elif i == steps-1:
+                print(f'Do {typethis} from step {typestart} to {i}')
+            else:
+                if typethis != refine_schedule[i]:
+                    print(f'Do {typethis} from step {typestart} to {i-1}')
+                    typethis = refine_schedule[i]
+                    typestart = i
 
     if rho_start is not None:
         rho = rho_start
@@ -2865,7 +2945,9 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
                 return []
 
         #TODO: Based on chi^2 improvement and after some pre-defined steps, assign some steps to error reduction
-        if refine_schedule[j] == 'r':
+        if refine_schedule[j] == 're':
+            if refine_schedule[j] != refine_schedule[j-1] and j > 0:
+                print('Switch to real space refinement')
             #sigma_trial = 0.12 - min(0.1 * (j*2 / steps), 0.1)
             lig_cen = cp.array([minx + (maxx-minx) * cp.random.random(),
                                  miny + (maxy-miny) * cp.random.random(),
@@ -2946,7 +3028,7 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
                     change_next_n_steps_to_q = int(max(min(pip_period, pip_period * (1 - performance / pip_threshold)), 0))
                     print(f'Performance is {performance*100:.1f} % over the last {pip_period} steps, changing next {change_next_n_steps_to_q} steps to reciprocal space refinement')
                     if change_next_n_steps_to_q > 0:
-                        refine_schedule[(j+1):(j+change_next_n_steps_to_q+1)] = 'q'
+                        refine_schedule[(j+1):(j+change_next_n_steps_to_q+1)] = 'er'
                 else:
                     print(f'Performance is {performance*100:.1f} % over the last {pip_period} steps')
             if j == refine_switch and refine_mode == 'pip':
@@ -2963,7 +3045,9 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
                 rho = rho_guess_test
             rhoprime = rho 
 
-        elif refine_schedule[j] == 'q':
+        elif refine_schedule[j] == 'er': # Error reduction
+            if refine_schedule[j] != refine_schedule[j-1] and j > 0:
+                print('Switch to error reduction')
             F = myfftn(rho + ref_rho, DENSS_GPU=DENSS_GPU)
             #F[myabs(F,DENSS_GPU=DENSS_GPU) == 0] = 1e-16
             I3D = myabs(F, DENSS_GPU=DENSS_GPU)**2
@@ -2978,7 +3062,6 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
 
             newrho = myzeros(rho.shape, DENSS_GPU=DENSS_GPU)
 
-            #Error Reduction
             newrho[support] = rhoprime[support]
             newrho[~support] = 0.0
             newrho[newrho < 0] = 0.0
@@ -2996,7 +3079,55 @@ def denss_ligand_real(q, I, sigq, dmax, ref_rho,
                     change_next_n_steps_to_q = int(max(min(pip_period, pip_period * (1 - performance / pip_threshold)), 0))
                     print(f'Performance is {performance*100:.1f} % over the last {pip_period} steps, changing next {change_next_n_steps_to_q} steps to reciprocal space refinement')
                     if change_next_n_steps_to_q > 0:
-                        refine_schedule[(j+1):(j+change_next_n_steps_to_q+1)] = 'q'
+                        refine_schedule[(j+1):(j+change_next_n_steps_to_q+1)] = 'er'
+                else:
+                    print(f'Performance is {performance*100:.1f} % over the last {pip_period} steps')
+            if j == refine_switch and refine_mode == 'pip':
+                print('Starting performance evaluation ...')
+            rho = newrho
+            #rho = rho / mysum(rho, DENSS_GPU=DENSS_GPU) * lig_ne
+            rhoprime = rho
+            
+
+        elif refine_schedule[j] == 'hi': # HIO 
+            if refine_schedule[j] != refine_schedule[j-1] and j > 0:
+                print('Switch to hybrid input-output')
+
+            inrho = rho + ref_rho
+            F = myfftn(inrho, DENSS_GPU=DENSS_GPU)
+            #F[myabs(F,DENSS_GPU=DENSS_GPU) == 0] = 1e-16
+            I3D = myabs(F, DENSS_GPU=DENSS_GPU)**2
+            Imean = mybinmean(I3D, qbin_labels, DENSS_GPU=DENSS_GPU)
+            chi[j] = mysum(((Imean[qba]-Idata)/sigqdata)**2, DENSS_GPU=DENSS_GPU)/Idata.size
+
+            factors = mysqrt(Idata/Imean[qba], DENSS_GPU=DENSS_GPU)
+            F *= factors[qbin_labels]
+
+            #APPLY REAL SPACE RESTRAINTS
+            rhoprime = myifftn(F, DENSS_GPU=DENSS_GPU).real
+            #rhoprime = rhoprime.real - ref_rho
+
+            newrho = myzeros(rho.shape, DENSS_GPU=DENSS_GPU)
+            newrho[lig_mask] = rhoprime[lig_mask]
+            beta = 0.9
+            newrho[~lig_mask] = inrho[~lig_mask] - beta * rhoprime[~lig_mask]
+
+            newrho = newrho - ref_rho
+            newrho[newrho < 0] = 0.0
+
+            if j%timing_period == 0 and j > 0:
+                t1 = time.time() - t0
+                if t1 < j:
+                    print(f'Timing: {t1:.2f} s, {j/t1:.2f} steps / s, chi2 improv = {(1 - chi[j] / chi[j-timing_period])* 100:.1f} %', end='\n')
+                else:
+                    print(f'Timing: {t1:.2f} s, {t1/j:.2f} s / step', end='\n')
+            if j>refine_switch and j%pip_period == 0 and refine_mode == 'pip':
+                performance = 1 - chi[j] / chi[j-pip_period]
+                if performance < pip_threshold:
+                    change_next_n_steps_to_q = int(max(min(pip_period, pip_period * (1 - performance / pip_threshold)), 0))
+                    print(f'Performance is {performance*100:.1f} % over the last {pip_period} steps, changing next {change_next_n_steps_to_q} steps to reciprocal space refinement')
+                    if change_next_n_steps_to_q > 0:
+                        refine_schedule[(j+1):(j+change_next_n_steps_to_q+1)] = 'er'
                 else:
                     print(f'Performance is {performance*100:.1f} % over the last {pip_period} steps')
             if j == refine_switch and refine_mode == 'pip':
